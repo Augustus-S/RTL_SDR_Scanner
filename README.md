@@ -31,6 +31,45 @@ Example package names on Debian/Ubuntu-like systems:
 sudo apt install cmake g++ librtlsdr-dev libfftw3-dev libspdlog-dev nlohmann-json3-dev
 ```
 
+## Hardware And RTL-SDR Driver
+
+To use the full 10 MHz - 1700 MHz receive range expected by this repository, use RTL-SDR v3 compatible hardware. Other RTL-SDR dongles may work for part of the range, but their supported frequency range, gain behavior, and direct-sampling support can differ.
+
+The upstream RTL-SDR driver and tools are maintained here:
+
+- https://github.com/osmocom/rtl-sdr
+
+Install the packaged RTL-SDR driver and command-line tools on Debian/Ubuntu-like systems:
+
+```bash
+sudo apt update
+sudo apt install rtl-sdr librtlsdr-dev
+```
+
+If the kernel DVB driver has claimed the dongle, blacklist it and reload the device:
+
+```bash
+printf 'blacklist dvb_usb_rtl28xxu\nblacklist rtl2832\nblacklist rtl2830\n' | \
+  sudo tee /etc/modprobe.d/blacklist-rtl-sdr.conf
+sudo modprobe -r dvb_usb_rtl28xxu rtl2832 rtl2830
+```
+
+Check that the receiver can be opened:
+
+```bash
+rtl_test -t
+```
+
+Run a short receive test with the tools provided by the driver:
+
+```bash
+rtl_test -s 2400000
+rtl_sdr -f 1090000000 -s 2000000 -n 2000000 /tmp/adsb_1090.iq
+rtl_sdr -f 100000000 -s 2000000 -n 2000000 /tmp/fm_100mhz.iq
+```
+
+The generated `.iq` files are raw unsigned 8-bit interleaved IQ samples. Only run one RTL-SDR program at a time because the hardware can only be owned by one process.
+
 ## Build
 
 ```bash
@@ -208,6 +247,7 @@ Primary APIs:
 
 ## Notes
 
+- Full 10 MHz - 1700 MHz operation requires RTL-SDR v3 compatible hardware. The effective usable range still depends on antenna, gain, local RF environment, and the current constants in `include/constants.hpp`.
 - Running against RTL-SDR hardware may require udev rules or root privileges.
 - Only one process should own the RTL-SDR device at a time.
 - ADS-B decoding is tuned for 1090 MHz at 2 MS/s.
