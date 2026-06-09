@@ -16,6 +16,7 @@ PersistentAsyncReader::~PersistentAsyncReader() {
 
 void PersistentAsyncReader::shutdown() {
     if (!running_.exchange(false)) return;
+    if (dev_) { rtlsdr_cancel_async(dev_); }
 
     {
         std::lock_guard<std::mutex> lock(mtx_);

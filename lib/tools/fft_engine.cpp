@@ -9,11 +9,21 @@ FftEngine::FftEngine(int fftSize)
     , half_(fftSize / 2) {
     in_  = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * fftSize_);
     out_ = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * fftSize_);
+    if (!in_ || !out_) {
+        fftw_free(in_);
+        fftw_free(out_);
+        throw std::runtime_error("Failed to allocate FFTW buffers");
+    }
     plan_ = fftw_plan_dft_1d(fftSize_, in_, out_, FFTW_FORWARD, FFTW_MEASURE);
+    if (!plan_) {
+        fftw_free(in_);
+        fftw_free(out_);
+        throw std::runtime_error("Failed to create FFTW plan");
+    }
 }
 
 FftEngine::~FftEngine() {
-    fftw_destroy_plan(plan_);
+    if (plan_) fftw_destroy_plan(plan_);
     fftw_free(in_);
     fftw_free(out_);
 }

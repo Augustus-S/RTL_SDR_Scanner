@@ -30,7 +30,8 @@ public:
 
     int run();
 
-    void requestShutdown() { running_ = false; }
+    void requestExit();
+    void requestShutdown();
 
 private:
     void setupSignalHandlers();
@@ -39,7 +40,7 @@ private:
     void runHeartbeat();
     void runRadioLoop();
 
-    AppConfig config_;
+    AppConfig         config_;
     std::atomic<bool> running_{true};
 
     std::atomic<bool>          adsbEnabled_{false};
@@ -49,10 +50,10 @@ private:
     std::atomic<int>           maxGain_{0};
 
     std::unique_ptr<rtl::scanner::RtlSdrDevice> device_;
-    std::unique_ptr<rtl::tools::Pusher>          pusher_;
-    std::unique_ptr<rtl::scanner::ScanEngine>    scanEngine_;
-    std::unique_ptr<rtl::sda_b::ADSBEngine>      adsbEngine_;
-    std::unique_ptr<HttpController>              httpController_;
+    std::unique_ptr<rtl::tools::Pusher>         pusher_;
+    std::unique_ptr<rtl::scanner::ScanEngine>   scanEngine_;
+    std::unique_ptr<rtl::sda_b::ADSBEngine>     adsbEngine_;
+    std::unique_ptr<HttpController>             httpController_;
 
     std::thread heartbeatThread_;
     std::thread radioThread_;

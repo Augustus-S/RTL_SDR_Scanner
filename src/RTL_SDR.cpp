@@ -1,6 +1,8 @@
 #include <iostream>
 #include <cstdlib>
+#include <cmath>
 #include "core/application.hpp"
+#include "constants.hpp"
 #include "tools/tools.hpp"
 
 namespace {
@@ -121,11 +123,15 @@ bool validateConfig(const rtl::core::AppConfig& config) {
         return false;
     }
     if (config.scanEnabled) {
-        if (config.startFreqHz < 10e6 || config.startFreqHz > 1070e6) {
+        if (!std::isfinite(config.startFreqHz) || !std::isfinite(config.endFreqHz)) {
+            std::cerr << "Error: Frequency must be finite\n";
+            return false;
+        }
+        if (config.startFreqHz < rtl::constants::MIN_FREQ || config.startFreqHz > rtl::constants::MAX_FREQ) {
             std::cerr << "Error: Start frequency out of range\n";
             return false;
         }
-        if (config.endFreqHz < 10e6 || config.endFreqHz > 1070e6) {
+        if (config.endFreqHz < rtl::constants::MIN_FREQ || config.endFreqHz > rtl::constants::MAX_FREQ) {
             std::cerr << "Error: End frequency out of range\n";
             return false;
         }
@@ -133,7 +139,7 @@ bool validateConfig(const rtl::core::AppConfig& config) {
             std::cerr << "Error: End frequency must be greater than start frequency\n";
             return false;
         }
-        if ((config.endFreqHz - config.startFreqHz) > 100e6) {
+        if ((config.endFreqHz - config.startFreqHz) > rtl::constants::MAX_BANDWIDTH) {
             std::cerr << "Error: Bandwidth exceeds 100 MHz limit\n";
             return false;
         }

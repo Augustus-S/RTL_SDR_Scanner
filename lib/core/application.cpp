@@ -14,154 +14,7 @@ namespace {
 Application* g_appInstance = nullptr;
 
 void signalHandler(int) {
-    if (g_appInstance) {
-        g_appInstance->requestShutdown();
-    }
-}
-
-void printHelp(const char* progName) {
-    std::cout << "RTL-SDR Scanner v2.0\n"
-              << "====================\n\n"
-              << "Usage: " << progName << " [options]\n\n"
-              << "Options:\n"
-              << "  --mode <1|2|3>        1=ADS-B only, 2=Scan only, 3=Both\n"
-              << "  --start-freq <MHz>    Scan start frequency (10-1070 MHz)\n"
-              << "  --end-freq <MHz>      Scan end frequency (10-1070 MHz)\n"
-              << "  --adsb                Enable ADS-B decoding\n"
-              << "  --scan                Enable frequency scanning\n"
-              << "  --help, -h            Show this help message\n\n"
-              << "Frequency range: 10 MHz - 1070 MHz\n"
-              << "Maximum bandwidth: 100 MHz\n"
-              << "Data output: 127.0.0.1:23568\n"
-              << "Control port: 127.0.0.1:23569\n";
-}
-
-AppConfig parseArgs(int argc, char* argv[]) {
-    AppConfig config;
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--help" || arg == "-h") {
-            printHelp(argv[0]);
-            exit(0);
-        } else if (arg == "--mode" && i + 1 < argc) {
-            int mode = std::atoi(argv[++i]);
-            if (mode == 1)
-                config.adsbEnabled = true;
-            else if (mode == 2)
-                config.scanEnabled = true;
-            else if (mode == 3) {
-                config.adsbEnabled = true;
-                config.scanEnabled = true;
-            }
-        } else if (arg == "--start-freq" && i + 1 < argc) {
-            config.startFreqHz = std::atof(argv[++i]) * 1e6;
-        } else if (arg == "--end-freq" && i + 1 < argc) {
-            config.endFreqHz = std::atof(argv[++i]) * 1e6;
-        } else if (arg == "--adsb") {
-            config.adsbEnabled = true;
-        } else if (arg == "--scan") {
-            config.scanEnabled = true;
-        }
-    }
-    return config;
-}
-
-AppConfig interactiveMenu() {
-    AppConfig config;
-
-    std::cout << "\nRTL-SDR Scanner v2.0\n"
-              << "====================\n"
-              << "1. ADS-B Decode Only\n"
-              << "2. Scan Only\n"
-              << "3. ADS-B + Scan\n"
-              << "4. Exit\n"
-              << "\nSelect mode: ";
-
-    int mode;
-    std::cin >> mode;
-
-    if (mode == 1) {
-        config.adsbEnabled = true;
-    } else if (mode == 2) {
-        config.scanEnabled = true;
-    } else if (mode == 3) {
-        config.adsbEnabled = true;
-        config.scanEnabled = true;
-    } else {
-        exit(0);
-    }
-
-    if (config.scanEnabled) {
-        std::cout << "\nFrequency Configuration\n"
-                  << "=======================\n"
-                  << "Range: 10 MHz - 1070 MHz, Max bandwidth: 100 MHz\n";
-
-        double startMhz, endMhz;
-        while (true) {
-            std::cout << "Enter start frequency (MHz): ";
-            std::cin >> startMhz;
-            if (startMhz < 10.0 || startMhz > 1070.0) {
-                std::cout << "Error: Start frequency must be between 10 and 1070 MHz\n";
-                continue;
-            }
-            break;
-        }
-
-        while (true) {
-            std::cout << "Enter end frequency (MHz): ";
-            std::cin >> endMhz;
-            if (endMhz < 10.0 || endMhz > 1070.0) {
-                std::cout << "Error: End frequency must be between 10 and 1070 MHz\n";
-                continue;
-            }
-            if (endMhz <= startMhz) {
-                std::cout << "Error: End frequency must be greater than start frequency\n";
-                continue;
-            }
-            if ((endMhz - startMhz) > 100.0) {
-                std::cout << "Error: Bandwidth cannot exceed 100 MHz\n";
-                continue;
-            }
-            break;
-        }
-
-        config.startFreqHz = startMhz * 1e6;
-        config.endFreqHz   = endMhz * 1e6;
-    }
-
-    return config;
-}
-
-bool validateConfig(const AppConfig& config) {
-    if (!config.adsbEnabled && !config.scanEnabled) {
-        spdlog::error("No functionality selected");
-        return false;
-    }
-
-    if (config.scanEnabled) {
-        if (!std::isfinite(config.startFreqHz) || !std::isfinite(config.endFreqHz)) {
-            spdlog::error("Frequency must be finite");
-            return false;
-        }
-        if (config.startFreqHz < rtl::constants::MIN_FREQ || config.startFreqHz > rtl::constants::MAX_FREQ) {
-            spdlog::error("Start frequency out of range: {} MHz", config.startFreqHz / 1e6);
-            return false;
-        }
-        if (config.endFreqHz < rtl::constants::MIN_FREQ || config.endFreqHz > rtl::constants::MAX_FREQ) {
-            spdlog::error("End frequency out of range: {} MHz", config.endFreqHz / 1e6);
-            return false;
-        }
-        if (config.endFreqHz <= config.startFreqHz) {
-            spdlog::error("End frequency must be greater than start frequency");
-            return false;
-        }
-        if ((config.endFreqHz - config.startFreqHz) > rtl::constants::MAX_BANDWIDTH) {
-            spdlog::error("Bandwidth exceeds 100 MHz limit");
-            return false;
-        }
-    }
-    return true;
+    if (g_appInstance) { g_appInstance->requestExit(); }
 }
 
 } // namespace
@@ -175,9 +28,19 @@ Application::Application(const AppConfig& config)
 }
 
 Application::~Application() {
-    running_ = false;
+    requestShutdown();
     if (radioThread_.joinable()) radioThread_.join();
     if (heartbeatThread_.joinable()) heartbeatThread_.join();
+}
+
+void Application::requestExit() {
+    running_ = false;
+}
+
+void Application::requestShutdown() {
+    running_ = false;
+    if (adsbEngine_) adsbEngine_->requestStop();
+    if (scanEngine_) scanEngine_->requestStop();
 }
 
 void Application::setupSignalHandlers() {
@@ -244,7 +107,10 @@ void Application::runRadioLoop() {
         if (!scanEnabled_.load()) {
             if (adsbEnabled_.load()) {
                 spdlog::info("Entering continuous ADS-B mode");
-                adsbEngine_->runSlice(std::chrono::milliseconds(0));
+                auto result = adsbEngine_->runSlice(std::chrono::milliseconds(0), [this] {
+                    return running_.load() && adsbEnabled_.load() && !scanEnabled_.load();
+                });
+                if (result == rtl::sda_b::ADSBEngine::RunResult::DEVICE_ERROR) { running_ = false; }
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -253,12 +119,21 @@ void Application::runRadioLoop() {
 
         scanEngine_->setFreqRange(startFreq_.load(), endFreq_.load());
         scanEngine_->start();
-        scanEngine_->doOneSweep();
+        auto sweepResult = scanEngine_->doOneSweep([this] {
+            return running_.load() && scanEnabled_.load();
+        });
         scanEngine_->stop();
+        if (sweepResult == rtl::scanner::ScanEngine::SweepResult::DEVICE_ERROR) {
+            running_ = false;
+            break;
+        }
 
         if (running_ && scanEnabled_.load() && adsbEnabled_.load()) {
             spdlog::info("Decoding ADS-B signal (time-slice)...");
-            adsbEngine_->runSlice(std::chrono::seconds(10));
+            auto result = adsbEngine_->runSlice(std::chrono::seconds(10), [this] {
+                return running_.load() && adsbEnabled_.load() && scanEnabled_.load();
+            });
+            if (result == rtl::sda_b::ADSBEngine::RunResult::DEVICE_ERROR) { running_ = false; }
         }
     }
 
@@ -280,27 +155,34 @@ int Application::run() {
     scanEngine_ = std::make_unique<rtl::scanner::ScanEngine>(device_->getRawDev(), *pusher_);
     adsbEngine_ = std::make_unique<rtl::sda_b::ADSBEngine>(device_->getRawDev(), *pusher_, maxGain_.load());
 
-    httpController_ = std::make_unique<HttpController>(
-        running_, adsbEnabled_, scanEnabled_, startFreq_, endFreq_);
-    httpController_->start(rtl::constants::CONTROL_PORT);
+    httpController_ = std::make_unique<HttpController>(running_, adsbEnabled_, scanEnabled_, startFreq_, endFreq_);
+    httpController_->setAdsbStopCallback([this] {
+        if (adsbEngine_) adsbEngine_->requestStop();
+    });
+    httpController_->setScanStopCallback([this] {
+        if (scanEngine_) scanEngine_->requestStop();
+    });
+    if (!httpController_->start(rtl::constants::CONTROL_PORT)) {
+        spdlog::error("Failed to start HTTP controller");
+        return 1;
+    }
 
     heartbeatThread_ = std::thread(&Application::runHeartbeat, this);
     radioThread_     = std::thread(&Application::runRadioLoop, this);
 
-    while (running_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
+    while (running_) { std::this_thread::sleep_for(std::chrono::milliseconds(500)); }
 
     spdlog::info("Shutting down...");
 
     running_ = false;
 
     if (adsbEngine_) adsbEngine_->requestStop();
-
-    scanEngine_->stop();
+    if (scanEngine_) scanEngine_->requestStop();
 
     if (radioThread_.joinable()) radioThread_.join();
     if (heartbeatThread_.joinable()) heartbeatThread_.join();
+
+    if (scanEngine_) scanEngine_->stop();
 
     httpController_->stop();
 

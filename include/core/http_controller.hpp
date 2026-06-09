@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -12,11 +13,12 @@ namespace rtl::core {
 
 class HttpController {
 public:
-    HttpController(std::atomic<bool>&         running,
-                   std::atomic<bool>&         adsbEnabled,
-                   std::atomic<bool>&         scanEnabled,
-                   std::atomic<std::uint32_t>& startFreq,
-                   std::atomic<std::uint32_t>& endFreq);
+    HttpController(
+        std::atomic<bool>&          running,
+        std::atomic<bool>&          adsbEnabled,
+        std::atomic<bool>&          scanEnabled,
+        std::atomic<std::uint32_t>& startFreq,
+        std::atomic<std::uint32_t>& endFreq);
     ~HttpController();
 
     HttpController(const HttpController&)            = delete;
@@ -24,6 +26,8 @@ public:
 
     bool start(int port);
     void stop();
+    void setAdsbStopCallback(std::function<void()> callback);
+    void setScanStopCallback(std::function<void()> callback);
 
 private:
     void registerRoutes();
@@ -36,6 +40,8 @@ private:
     std::atomic<bool>&          scanEnabled_;
     std::atomic<std::uint32_t>& startFreq_;
     std::atomic<std::uint32_t>& endFreq_;
+    std::function<void()>       adsbStopCallback_;
+    std::function<void()>       scanStopCallback_;
 };
 
 } // namespace rtl::core

@@ -18,12 +18,12 @@ void adsbAsyncCallback(unsigned char* buf, std::uint32_t len, void* ctx) {
 ADSBEngine::ADSBEngine(rtlsdr_dev_t* dev, rtl::tools::Pusher& pusher, int maxGain)
     : dev_(dev)
     , maxGain_(maxGain)
-    , demodulator_(pusher) {
-}
+    , demodulator_(pusher) {}
 
 ADSBEngine::~ADSBEngine() = default;
 
-void ADSBEngine::runSlice(std::chrono::milliseconds maxDuration) {
+ADSBEngine::RunResult
+    ADSBEngine::runSlice(std::chrono::milliseconds maxDuration, const std::function<bool()>& shouldContinue) {
     stopRequested_ = false;
 
     rtlsdr_set_sample_rate(dev_, rtl::constants::ADSB_SAMPLE_RATE);
@@ -42,6 +42,7 @@ void ADSBEngine::runSlice(std::chrono::milliseconds maxDuration) {
 
     auto adsbStart = std::chrono::steady_clock::now();
     while (!stopRequested_.load()) {
+        if (shouldContinue && !shouldContinue()) break;
         if (maxDuration.count() > 0 && std::chrono::steady_clock::now() - adsbStart >= maxDuration) break;
         if (adsbAsyncRet.load() != 0) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -49,10 +50,13 @@ void ADSBEngine::runSlice(std::chrono::milliseconds maxDuration) {
 
     if (adsbAsyncRet.load() < 0) {
         spdlog::error("rtlsdr_read_async failed: {}", adsbAsyncRet.load());
+        if (adsbThread.joinable()) adsbThread.join();
+        return RunResult::DEVICE_ERROR;
     } else if (adsbAsyncRet.load() == 0) {
         rtlsdr_cancel_async(dev_);
     }
     if (adsbThread.joinable()) adsbThread.join();
+    return stopRequested_.load() ? RunResult::STOPPED : RunResult::COMPLETED;
 }
 
 void ADSBEngine::requestStop() {

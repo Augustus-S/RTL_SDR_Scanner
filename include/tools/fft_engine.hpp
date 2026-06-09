@@ -2,6 +2,7 @@
 
 #include <complex>
 #include <cstddef>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 #include <fftw3.h>
@@ -23,7 +24,7 @@ private:
     int           half_;
     fftw_complex* in_;
     fftw_complex* out_;
-    fftw_plan     plan_;
+    fftw_plan     plan_ = nullptr;
 };
 
 } // namespace rtl::tools

@@ -3,6 +3,7 @@
 #include <rtl-sdr.h>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <thread>
 #include "ads_b/ads_b_demodulator.hpp"
 #include "tools/pusher.hpp"
@@ -17,7 +18,15 @@ public:
     ADSBEngine(const ADSBEngine&)            = delete;
     ADSBEngine& operator=(const ADSBEngine&) = delete;
 
-    void runSlice(std::chrono::milliseconds maxDuration = std::chrono::milliseconds(0));
+    enum class RunResult {
+        COMPLETED,
+        STOPPED,
+        DEVICE_ERROR
+    };
+
+    RunResult runSlice(
+        std::chrono::milliseconds    maxDuration    = std::chrono::milliseconds(0),
+        const std::function<bool()>& shouldContinue = {});
 
     void requestStop();
 

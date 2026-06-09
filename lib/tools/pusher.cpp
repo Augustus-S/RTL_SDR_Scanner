@@ -46,10 +46,14 @@ std::unordered_map<std::string, rtl::sda_b::Aircraft> Pusher::filterLatestAircra
     return latestData;
 }
 
+bool Pusher::hasPendingData() const {
+    std::lock_guard<std::mutex> _(lock_);
+    return !aircraftQueue_.empty() || !scanQueue_.empty();
+}
+
 void Pusher::work() {
-    while (loop_) {
+    while (loop_ || hasPendingData()) {
         for (int i = 0; i < 10 && loop_; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); }
-        if (!loop_) break;
 
         std::unordered_map<std::string, rtl::sda_b::Aircraft> latestData;
         std::deque<nlohmann::json>                            scanBatch;

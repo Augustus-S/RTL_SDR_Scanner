@@ -3,21 +3,23 @@
 #include <cmath>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
+#include <chrono>
+#include <thread>
+#include <utility>
 
 namespace rtl::core {
 
 HttpController::HttpController(
-    std::atomic<bool>&         running,
-    std::atomic<bool>&         adsbEnabled,
-    std::atomic<bool>&         scanEnabled,
+    std::atomic<bool>&          running,
+    std::atomic<bool>&          adsbEnabled,
+    std::atomic<bool>&          scanEnabled,
     std::atomic<std::uint32_t>& startFreq,
     std::atomic<std::uint32_t>& endFreq)
     : running_(running)
     , adsbEnabled_(adsbEnabled)
     , scanEnabled_(scanEnabled)
     , startFreq_(startFreq)
-    , endFreq_(endFreq) {
-}
+    , endFreq_(endFreq) {}
 
 HttpController::~HttpController() {
     stop();
@@ -25,6 +27,7 @@ HttpController::~HttpController() {
 
 bool HttpController::start(int port) {
     registerRoutes();
+    if (serverThread_.joinable()) return false;
 
     serverThread_ = std::thread([this, port]() {
         if (!srv_.listen("0.0.0.0", port)) {
@@ -33,8 +36,25 @@ bool HttpController::start(int port) {
         }
     });
 
-    spdlog::info("HTTP control server started on port {}", port);
-    return true;
+    for (int i = 0; i < 20; ++i) {
+        if (srv_.is_running()) {
+            spdlog::info("HTTP control server started on port {}", port);
+            return true;
+        }
+        if (!running_.load()) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    spdlog::warn("HTTP control server startup was not confirmed within timeout");
+    return srv_.is_running();
+}
+
+void HttpController::setAdsbStopCallback(std::function<void()> callback) {
+    adsbStopCallback_ = std::move(callback);
+}
+
+void HttpController::setScanStopCallback(std::function<void()> callback) {
+    scanStopCallback_ = std::move(callback);
 }
 
 void HttpController::stop() {
@@ -50,16 +70,19 @@ void HttpController::registerRoutes() {
 
     srv_.Post("/adsb/stop", [this](const httplib::Request&, httplib::Response& res) {
         adsbEnabled_.store(false);
+        if (adsbStopCallback_) adsbStopCallback_();
         res.set_content(R"({"status":"ok","adsb":"stopped"})", "application/json");
     });
 
     srv_.Post("/scan/start", [this](const httplib::Request&, httplib::Response& res) {
         scanEnabled_.store(true);
+        if (adsbStopCallback_) adsbStopCallback_();
         res.set_content(R"({"status":"ok","scan":"started"})", "application/json");
     });
 
     srv_.Post("/scan/stop", [this](const httplib::Request&, httplib::Response& res) {
         scanEnabled_.store(false);
+        if (scanStopCallback_) scanStopCallback_();
         res.set_content(R"({"status":"ok","scan":"stopped"})", "application/json");
     });
 

@@ -37,6 +37,10 @@ void ScanEngine::stop() {
     }
 }
 
+void ScanEngine::requestStop() {
+    running_ = false;
+}
+
 void ScanEngine::setFreqRange(std::uint32_t startHz, std::uint32_t endHz) {
     startFreq_.store(startHz);
     endFreq_.store(endHz);
@@ -46,23 +50,25 @@ std::pair<std::uint32_t, std::uint32_t> ScanEngine::getFreqRange() const {
     return {startFreq_.load(), endFreq_.load()};
 }
 
-bool ScanEngine::doOneSweep() {
-    if (!running_ || !reader_) return false;
+ScanEngine::SweepResult ScanEngine::doOneSweep(const std::function<bool()>& shouldContinue) {
+    if (!running_ || !reader_) return SweepResult::STOPPED;
 
     std::uint32_t sweep_start_freq = startFreq_.load();
     std::uint32_t sweep_end_freq   = endFreq_.load();
 
-    auto sweep_start = std::chrono::steady_clock::now();
+    auto                     sweep_start = std::chrono::steady_clock::now();
     std::vector<SegmentData> segments;
 
     for (std::uint32_t cur_freq = sweep_start_freq;
-         cur_freq <= sweep_end_freq && running_;
+         cur_freq <= sweep_end_freq && running_ && (!shouldContinue || shouldContinue());
          cur_freq += rtl::constants::STEP_FREQ) {
         int need_ds = (cur_freq < rtl::constants::LOW_FREQ_THRESHOLD) ? 2 : 0;
-        processOneHop(cur_freq, need_ds, segments);
+        if (!processOneHop(cur_freq, need_ds, segments)) {
+            return running_ ? SweepResult::DEVICE_ERROR : SweepResult::STOPPED;
+        }
     }
 
-    if (!running_) return false;
+    if (!running_ || (shouldContinue && !shouldContinue())) return SweepResult::STOPPED;
 
     if (!segments.empty()) {
         spliceAndPush(segments, sweep_start_freq, sweep_end_freq);
@@ -72,38 +78,39 @@ bool ScanEngine::doOneSweep() {
         spdlog::info("Sweep complete, took {} ms", sweep_elapsed.count());
     }
 
-    return true;
+    return SweepResult::COMPLETED;
 }
 
-void ScanEngine::processOneHop(std::uint32_t centerFreq, int directSampling, std::vector<SegmentData>& segments) {
+bool ScanEngine::processOneHop(std::uint32_t centerFreq, int directSampling, std::vector<SegmentData>& segments) {
     std::uint32_t n_read = 4 * rtl::constants::FFT_SIZE * 2;
-    auto scan_result =
+    auto          scan_result =
         reader_->read(bufferU8_.data(), &n_read, centerFreq, directSampling, rtl::constants::READ_TIMEOUT_MS);
 
     if (scan_result != PersistentAsyncReader::ReadResult::SUCCESS) {
         if (scan_result == PersistentAsyncReader::ReadResult::DEVICE_ERROR) {
             spdlog::error("Device error @ {} MHz, aborting", centerFreq / 1e6);
             running_ = false;
+            return false;
         } else {
             spdlog::warn("Read timeout @ {} MHz", centerFreq / 1e6);
         }
-        return;
+        return true;
     }
 
     int samples = static_cast<int>(n_read / 2);
     samples     = std::min<int>(samples, static_cast<int>(bufferIQ_.size()));
     for (int i = 0; i < samples; ++i) {
-        short I        = static_cast<short>(bufferU8_[2 * i]) - 127;
-        short Q        = static_cast<short>(bufferU8_[2 * i + 1]) - 127;
-        bufferIQ_[i]   = std::complex<short>(I, Q);
-        bufferQ_[i]    = Q;
+        short I      = static_cast<short>(bufferU8_[2 * i]) - 127;
+        short Q      = static_cast<short>(bufferU8_[2 * i + 1]) - 127;
+        bufferIQ_[i] = std::complex<short>(I, Q);
+        bufferQ_[i]  = Q;
     }
 
     rtl::tools::removeDc(bufferIQ_.data(), samples);
 
     auto [fft_power_sum, groups_num] = fftEngine_.accumulatePower(bufferIQ_.data(), samples);
 
-    if (groups_num <= 0) return;
+    if (groups_num <= 0) return true;
 
     double rssi;
     if (centerFreq < rtl::constants::LOW_FREQ_THRESHOLD) {
@@ -116,6 +123,7 @@ void ScanEngine::processOneHop(std::uint32_t centerFreq, int directSampling, std
     std::vector<double> spectrum_db = rtl::tools::spectrumToDb(fft_power_sum, groups_num);
     rtl::tools::suppressDcSpike(spectrum_db);
     segments.push_back({std::move(spectrum_db), static_cast<double>(centerFreq)});
+    return true;
 }
 
 void ScanEngine::spliceAndPush(
@@ -127,9 +135,7 @@ void ScanEngine::spliceAndPush(
         static_cast<double>(sweepEndFreq));
 
     rtl::tools::suppressPeriodicSpurs(
-        spliced_spectrum,
-        static_cast<double>(sweepStartFreq),
-        static_cast<double>(sweepEndFreq));
+        spliced_spectrum, static_cast<double>(sweepStartFreq), static_cast<double>(sweepEndFreq));
 
     double max_val = *std::max_element(spliced_spectrum.begin(), spliced_spectrum.end());
     double min_val = *std::min_element(spliced_spectrum.begin(), spliced_spectrum.end());

@@ -77,11 +77,12 @@ private:
     using AircraftQueue = std::deque<rtl::sda_b::Aircraft>;
 
     std::unordered_map<std::string, rtl::sda_b::Aircraft> filterLatestAircraft(AircraftQueue& queue);
+    bool                                                  hasPendingData() const;
 
     std::atomic<bool> loop_{true};
     std::thread       workThread_;
 
-    std::mutex                 lock_;
+    mutable std::mutex         lock_;
     AircraftQueue              aircraftQueue_;
     std::deque<nlohmann::json> scanQueue_;
 

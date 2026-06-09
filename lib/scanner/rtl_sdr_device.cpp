@@ -133,16 +133,14 @@ void RtlSdrDevice::setMaxGain() {
 std::vector<int> RtlSdrDevice::getTunerGains() const {
     if (!dev_) return {};
 
-    int gains[100] = {};
-    int numGains   = rtlsdr_get_tuner_gains(dev_, gains);
+    int numGains = rtlsdr_get_tuner_gains(dev_, nullptr);
     if (numGains <= 0) return {};
 
-    std::vector<int> result;
-    result.reserve(numGains);
-    for (int i = 0; i < numGains; ++i) {
-        result.push_back(gains[i]);
-    }
-    return result;
+    std::vector<int> gains(static_cast<std::size_t>(numGains));
+    int              ret = rtlsdr_get_tuner_gains(dev_, gains.data());
+    if (ret <= 0) return {};
+    gains.resize(static_cast<std::size_t>(ret));
+    return gains;
 }
 
 int RtlSdrDevice::getCurrentGain() const {
@@ -176,9 +174,7 @@ void RtlSdrDevice::stabilize(int dummyReads, int bufSize) {
     resetBuffer();
     std::vector<uint8_t> dummyBuf(bufSize);
     int                  dummyLen = 0;
-    for (int i = 0; i < dummyReads; ++i) {
-        rtlsdr_read_sync(dev_, dummyBuf.data(), bufSize, &dummyLen);
-    }
+    for (int i = 0; i < dummyReads; ++i) { rtlsdr_read_sync(dev_, dummyBuf.data(), bufSize, &dummyLen); }
     spdlog::info("Device stabilized");
 }
 

@@ -58,8 +58,6 @@ rtl::scanner::ScanPlan buildScanPlan(double startFreq, double endFreq, double ra
  */
 void removeDc(std::complex<short>* buf, std::size_t bufLen);
 
-
-
 /**
  * @brief Splice per-hop spectra into one range spectrum.
  * @param segments Per-hop spectrum segments.
