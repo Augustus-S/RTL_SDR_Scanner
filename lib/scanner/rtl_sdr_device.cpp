@@ -1,8 +1,14 @@
 #include "scanner/rtl_sdr_device.hpp"
 #include "constants.hpp"
 #include <spdlog/spdlog.h>
+#include <vector>
+#include <cstring>
 
 namespace rtl::scanner {
+
+int RtlSdrDevice::getDeviceCount() {
+    return rtlsdr_get_device_count();
+}
 
 RtlSdrDevice::RtlSdrDevice(uint32_t deviceIndex) {
     int deviceCount = rtlsdr_get_device_count();
@@ -35,7 +41,8 @@ RtlSdrDevice::~RtlSdrDevice() {
 
 RtlSdrDevice::RtlSdrDevice(RtlSdrDevice&& other) noexcept
     : dev_(other.dev_)
-    , currentDirectSampling_(other.currentDirectSampling_) {
+    , currentDirectSampling_(other.currentDirectSampling_)
+    , currentGain_(other.currentGain_) {
     other.dev_ = nullptr;
 }
 
@@ -44,6 +51,7 @@ RtlSdrDevice& RtlSdrDevice::operator=(RtlSdrDevice&& other) noexcept {
         if (dev_) { rtlsdr_close(dev_); }
         dev_                   = other.dev_;
         currentDirectSampling_ = other.currentDirectSampling_;
+        currentGain_           = other.currentGain_;
         other.dev_             = nullptr;
     }
     return *this;
@@ -72,6 +80,20 @@ void RtlSdrDevice::setCenterFreq(uint32_t freq) {
     if (ret < 0) { spdlog::error("Failed to set center freq {}: error {}", freq, ret); }
 }
 
+void RtlSdrDevice::setDirectSampling(int mode) {
+    if (!dev_) return;
+    int ret = rtlsdr_set_direct_sampling(dev_, mode);
+    if (ret < 0) {
+        spdlog::error("Failed to set direct sampling mode {}: error {}", mode, ret);
+    } else {
+        currentDirectSampling_ = mode;
+    }
+}
+
+int RtlSdrDevice::getDirectSampling() const {
+    return currentDirectSampling_;
+}
+
 void RtlSdrDevice::setGain(int gain) {
     if (!dev_) return;
 
@@ -79,24 +101,52 @@ void RtlSdrDevice::setGain(int gain) {
         rtlsdr_set_tuner_gain_mode(dev_, 0);
     } else {
         rtlsdr_set_tuner_gain_mode(dev_, 1);
-        rtlsdr_set_tuner_gain(dev_, gain);
+        int ret = rtlsdr_set_tuner_gain(dev_, gain);
+        if (ret < 0) {
+            spdlog::error("Failed to set tuner gain {}: error {}", gain, ret);
+        } else {
+            currentGain_ = gain;
+        }
     }
 }
 
 void RtlSdrDevice::setMaxGain() {
     if (!dev_) return;
 
-    int gains[100] = {};
-    int numGains   = rtlsdr_get_tuner_gains(dev_, gains);
-    if (numGains <= 0) {
+    auto gains = getTunerGains();
+    if (gains.empty()) {
         spdlog::error("Failed to get tuner gains");
         return;
     }
 
-    int maxGain = gains[numGains - 1];
+    int maxGain = gains.back();
     rtlsdr_set_tuner_gain_mode(dev_, 1);
-    rtlsdr_set_tuner_gain(dev_, maxGain);
-    spdlog::info("Max available gain: {} dB", maxGain / 10.0);
+    int ret = rtlsdr_set_tuner_gain(dev_, maxGain);
+    if (ret < 0) {
+        spdlog::error("Failed to set max tuner gain {}: error {}", maxGain, ret);
+    } else {
+        currentGain_ = maxGain;
+        spdlog::info("Max available gain: {} dB", maxGain / 10.0);
+    }
+}
+
+std::vector<int> RtlSdrDevice::getTunerGains() const {
+    if (!dev_) return {};
+
+    int gains[100] = {};
+    int numGains   = rtlsdr_get_tuner_gains(dev_, gains);
+    if (numGains <= 0) return {};
+
+    std::vector<int> result;
+    result.reserve(numGains);
+    for (int i = 0; i < numGains; ++i) {
+        result.push_back(gains[i]);
+    }
+    return result;
+}
+
+int RtlSdrDevice::getCurrentGain() const {
+    return currentGain_;
 }
 
 void RtlSdrDevice::setAgcMode(bool enable) {
@@ -118,6 +168,24 @@ int RtlSdrDevice::readSync(uint8_t* buffer, int bufLen, int* nRead) {
 void RtlSdrDevice::resetBuffer() {
     if (!dev_) return;
     rtlsdr_reset_buffer(dev_);
+}
+
+void RtlSdrDevice::stabilize(int dummyReads, int bufSize) {
+    if (!dev_) return;
+
+    resetBuffer();
+    std::vector<uint8_t> dummyBuf(bufSize);
+    int                  dummyLen = 0;
+    for (int i = 0; i < dummyReads; ++i) {
+        rtlsdr_read_sync(dev_, dummyBuf.data(), bufSize, &dummyLen);
+    }
+    spdlog::info("Device stabilized");
+}
+
+std::string RtlSdrDevice::getDeviceName() const {
+    if (!dev_) return "";
+    const char* name = rtlsdr_get_device_name(0);
+    return name ? std::string(name) : std::string();
 }
 
 } // namespace rtl::scanner
