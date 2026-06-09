@@ -214,3 +214,10 @@ Primary APIs:
 - The control API binds to all interfaces. Use firewall rules or change the bind address before exposing it on untrusted networks.
 - `rtl::tools::getCmdResult()` invokes the shell and must not receive untrusted input.
 - The namespace `rtl::sda_b` follows the current project request. The folder name remains `ads_b`.
+
+## TODO
+
+- [] AM_Demodulation
+- [] FM_Demodulation
+- [] Spectrum smooth
+- [] Automatic Modulation Classification (AM and FM)
