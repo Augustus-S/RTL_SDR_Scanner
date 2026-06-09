@@ -2,6 +2,8 @@
 
 #include <rtl-sdr.h>
 #include <cstdint>
+#include <string>
+#include <vector>
 #include "constants.hpp"
 
 /**
@@ -37,17 +39,32 @@ public:
     RtlSdrDevice(RtlSdrDevice&& other) noexcept;
     RtlSdrDevice& operator=(RtlSdrDevice&& other) noexcept;
 
+    /** @brief Get the number of available RTL-SDR devices. */
+    static int getDeviceCount();
+
     /** @brief Set sample rate in samples per second. */
     void setSampleRate(std::uint32_t rate);
 
     /** @brief Set center frequency in Hz and adjust direct sampling mode. */
     void setCenterFreq(std::uint32_t freq);
 
+    /** @brief Set direct sampling mode (0=off, 1=I-ADC, 2=Q-ADC). */
+    void setDirectSampling(int mode);
+
+    /** @brief Get current direct sampling mode. */
+    int getDirectSampling() const;
+
     /** @brief Set tuner gain in tenths of dB, or negative for AGC. */
     void setGain(int gain);
 
     /** @brief Select the maximum gain reported by the tuner. */
     void setMaxGain();
+
+    /** @brief Get the list of available tuner gain values. */
+    std::vector<int> getTunerGains() const;
+
+    /** @brief Get the current tuner gain value. */
+    int getCurrentGain() const;
 
     /** @brief Enable or disable tuner AGC mode. */
     void setAgcMode(bool enable);
@@ -67,6 +84,16 @@ public:
     /** @brief Reset the device sample buffer. */
     void resetBuffer();
 
+    /**
+     * @brief Stabilize the device by performing dummy reads.
+     * @param dummyReads Number of dummy read iterations.
+     * @param bufSize Size of each dummy read buffer in bytes.
+     */
+    void stabilize(int dummyReads = 100, int bufSize = 16384);
+
+    /** @brief Get the device name. */
+    std::string getDeviceName() const;
+
     /** @return true when a device handle is open. */
     bool isOpen() const {
         return dev_ != nullptr;
@@ -80,6 +107,7 @@ public:
 private:
     rtlsdr_dev_t* dev_                   = nullptr;
     int           currentDirectSampling_ = 0;
+    int           currentGain_           = 0;
 };
 
 } // namespace rtl::scanner

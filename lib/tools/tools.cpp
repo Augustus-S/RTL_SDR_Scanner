@@ -8,7 +8,6 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
-#include <fftw3.h>
 
 namespace rtl::tools {
 
@@ -115,49 +114,6 @@ void removeDc(std::complex<short>* buf, size_t bufLen) {
             static_cast<short>(std::lround(static_cast<double>(buf[i].real()) - mean_i)),
             static_cast<short>(std::lround(static_cast<double>(buf[i].imag()) - mean_q)));
     }
-}
-
-std::pair<std::vector<double>, int> calculateFft(const std::complex<short>* buf, size_t bufLen, double sampleRate) {
-    std::vector<double> fft_out(rtl::constants::FFT_SIZE, 0.0);
-    if (buf == nullptr || bufLen == 0) {
-        spdlog::warn("CalculateFFT: null or empty buffer");
-        return {fft_out, 0};
-    }
-
-    int groupsNum = static_cast<int>(bufLen) / rtl::constants::FFT_SIZE;
-    if (groupsNum <= 0) {
-        spdlog::warn("CalculateFFT: no FFT groups produced");
-        return {fft_out, 0};
-    }
-
-    fftw_complex* in  = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * rtl::constants::FFT_SIZE);
-    fftw_complex* out = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * rtl::constants::FFT_SIZE);
-
-    fftw_plan plan = fftw_plan_dft_1d(rtl::constants::FFT_SIZE, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
-
-    int half = rtl::constants::FFT_SIZE / 2;
-
-    for (int g = 0; g < groupsNum; ++g) {
-        for (int k = 0; k < rtl::constants::FFT_SIZE; ++k) {
-            in[k][0] = static_cast<double>(buf[g * rtl::constants::FFT_SIZE + k].real());
-            in[k][1] = static_cast<double>(buf[g * rtl::constants::FFT_SIZE + k].imag());
-        }
-
-        fftw_execute(plan);
-
-        for (int k = 0; k < rtl::constants::FFT_SIZE; ++k) {
-            int    shifted_k  = (k + half) % rtl::constants::FFT_SIZE;
-            double real       = out[shifted_k][0];
-            double imag       = out[shifted_k][1];
-            fft_out[k]       += (real * real + imag * imag);
-        }
-    }
-
-    fftw_destroy_plan(plan);
-    fftw_free(in);
-    fftw_free(out);
-
-    return {fft_out, groupsNum};
 }
 
 std::vector<double> spectrumToDb(const std::vector<double>& fftPowerSum, int groupsNum) {

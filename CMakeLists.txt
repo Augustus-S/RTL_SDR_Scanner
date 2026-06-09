@@ -16,9 +16,14 @@ add_executable(${PROJECT_NAME}
     src/RTL_SDR.cpp
     lib/tools/tools.cpp
     lib/tools/pusher.cpp
+    lib/tools/fft_engine.cpp
     lib/scanner/rtl_sdr_device.cpp
     lib/scanner/persistent_async_reader.cpp
+    lib/scanner/scan_engine.cpp
     lib/ads_b/ads_b_demodulator.cpp
+    lib/ads_b/adsb_engine.cpp
+    lib/core/application.cpp
+    lib/core/http_controller.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

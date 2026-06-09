@@ -58,15 +58,7 @@ rtl::scanner::ScanPlan buildScanPlan(double startFreq, double endFreq, double ra
  */
 void removeDc(std::complex<short>* buf, std::size_t bufLen);
 
-/**
- * @brief Calculate accumulated FFT power for a complex IQ buffer.
- * @param buf Pointer to complex IQ samples.
- * @param bufLen Number of complex samples.
- * @param sampleRate Sample rate in samples per second.
- * @return Pair of accumulated FFT power vector and number of FFT groups.
- * @note The output vector length is rtl::constants::FFT_SIZE.
- */
-std::pair<std::vector<double>, int> calculateFft(const std::complex<short>* buf, std::size_t bufLen, double sampleRate);
+
 
 /**
  * @brief Splice per-hop spectra into one range spectrum.
