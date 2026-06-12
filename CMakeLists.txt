@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFTW3 REQUIRED IMPORTED_TARGET fftw3)
 pkg_check_modules(RTLSDR REQUIRED librtlsdr)
+pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
 
 find_package(spdlog REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -40,3 +41,19 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 target_link_directories(${PROJECT_NAME} PRIVATE ${RTLSDR_LIBRARY_DIRS})
+
+add_executable(fm_broadcast_player
+    example/fm_broadcast_player.cpp
+)
+
+target_include_directories(fm_broadcast_player PRIVATE
+    ${RTLSDR_INCLUDE_DIRS}
+)
+
+target_link_libraries(fm_broadcast_player PRIVATE
+    ${RTLSDR_LIBRARIES}
+    PkgConfig::ALSA
+    spdlog::spdlog
+)
+
+target_link_directories(fm_broadcast_player PRIVATE ${RTLSDR_LIBRARY_DIRS})
