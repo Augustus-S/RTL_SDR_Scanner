@@ -1,6 +1,6 @@
 # FM Demodulation Algorithm
 
-本文档说明 `example/fm_broadcast_player.cpp` 中当前使用的 FM 广播解调算法。该示例实现的是宽带 FM（WBFM）解调：从 RTL-SDR 读取 unsigned 8-bit 交织 IQ 数据，解调得到 48 kHz、16-bit PCM 音频。默认 `--stereo on` 输出双声道立体声；使用 `--stereo off` 输出兼容单声道 `L+R`。默认 `--audio off` 时，PCM 写入标准输出；使用 `--audio on` 时，PCM 通过 ALSA 写入系统默认播放设备。
+本文档说明 `example/fm_broadcast_player.cpp` 中当前使用的 FM 广播解调算法。该示例实现的是宽带 FM（WBFM）解调：从 RTL-SDR 读取 unsigned 8-bit 交织 IQ 数据，解调得到 48 kHz、16-bit PCM 音频。默认 `--freq 97.7`、`--stereo off`，输出兼容单声道 `L+R`；使用 `--stereo on` 可输出双声道立体声。默认 `--audio on` 时，PCM 通过 ALSA 写入系统默认播放设备；使用 `--audio off` 时，PCM 写入标准输出。
 
 ## 1. 信号链路
 
@@ -10,7 +10,7 @@
 RTL-SDR unsigned 8-bit IQ
   -> offset tuning 数字搬移
   -> IQ 归一化
-  -> 120 kHz 复基带信道低通 FIR
+  -> 可选 120 kHz 复基带信道低通 FIR
   -> 相位差 FM 鉴频
   -> 100 kHz 复合基带低通 FIR
   -> 5 倍降采样到 240 kHz
@@ -31,7 +31,7 @@ RTL-SDR unsigned 8-bit IQ
 | 复合基带采样率 | `240000` Hz | 鉴频后第一级降采样输出 |
 | 总降采样因子 | `25` | `5 * 5` |
 | 默认调谐偏移 | `250000` Hz | 让目标电台避开 RTL-SDR 中心 DC spur |
-| RF 信道低通截止频率 | `120000` Hz | 鉴频前保留 WBFM 信道 |
+| RF 信道低通截止频率 | `120000` Hz | 可选 `--rf-filter on` 时，鉴频前保留 WBFM 信道；默认关闭以保证实时播放 |
 | 复合基带低通截止频率 | `100000` Hz | 鉴频后第一级抗混叠滤波 |
 | 音频低通截止频率 | `15000` Hz | 保留 FM 广播单声道音频主信号 |
 | 立体声导频 | `19000` Hz | 用于恢复 38 kHz 副载波 |
@@ -76,7 +76,7 @@ $$
 可以通过命令行关闭 offset tuning：
 
 ```bash
-build/fm_broadcast_player --freq 100.0 --offset off --audio on
+build/fm_broadcast_player --offset off --audio on
 ```
 
 但 RTL-SDR 接收 WBFM 时通常建议保持默认的 `--offset on`。
@@ -212,7 +212,7 @@ $$
 
 ## 5. FIR 低通滤波
 
-FM 广播的复合基带中包含单声道 `L+R` 音频、19 kHz 立体声导频、23-53 kHz 的 `L-R` 双边带抑制载波信号和其他附加业务。当前示例默认解码立体声；关闭立体声时，只保留约 15 kHz 以下的 `L+R` 主信道作为单声道输出。
+FM 广播的复合基带中包含单声道 `L+R` 音频、19 kHz 立体声导频、23-53 kHz 的 `L-R` 双边带抑制载波信号和其他附加业务。当前示例默认解码单声道，只保留约 15 kHz 以下的 `L+R` 主信道；开启立体声时，会额外使用导频和 `L-R` 差信号恢复左右声道。
 
 低通 FIR 滤波器使用 windowed-sinc 方式生成。理想低通的离散冲激响应为：
 
@@ -368,7 +368,7 @@ $$
 用户可以通过命令行参数选择不同去加重时间，例如：
 
 ```bash
-build/fm_broadcast_player --freq 100.0 --deemphasis 75 --audio on
+build/fm_broadcast_player --freq 97.7 --deemphasis 75 --audio on
 ```
 
 ## 9. 音量缩放、限幅与 PCM 输出
@@ -404,34 +404,34 @@ $$
 p[m] \in [-32767, 32767]
 $$
 
-默认情况下，程序把 PCM 数据写入标准输出：
+默认情况下，程序会打开 ALSA 播放设备并写入 PCM：
 
 ```text
-stdout: signed 16-bit little-endian, stereo interleaved, 48000 Hz
+ALSA device: signed 16-bit little-endian, mono, 48000 Hz by default
 ```
 
-因此可以使用：
+直接播放：
 
 ```bash
-build/fm_broadcast_player --freq 100.0 | aplay -r 48000 -f S16_LE -c 2
+build/fm_broadcast_player
 ```
 
-单声道输出需要关闭立体声：
+默认 ALSA 设备为 `"default"`。如果在 `sudo` 下运行时桌面音频服务不可用，程序会自动尝试 `"sysdefault"` 和 `"plughw:0,0"`；也可以用 `aplay -L` 查看设备名后显式指定：
 
 ```bash
-build/fm_broadcast_player --freq 100.0 --stereo off | aplay -r 48000 -f S16_LE -c 1
+build/fm_broadcast_player --audio-device plughw:0,0
 ```
 
-如果使用内置播放功能：
+如需把 PCM 写入标准输出，需要显式关闭内置播放并通过管道或重定向消费输出：
 
 ```bash
-build/fm_broadcast_player --freq 100.0 --audio on
+build/fm_broadcast_player --audio off | aplay -r 48000 -f S16_LE -c 1
 ```
 
-程序会打开 ALSA 的 `"default"` 播放设备，并写入同样格式的 PCM：
+立体声输出需要显式开启立体声，并按 2 声道播放：
 
-```text
-ALSA default device: signed 16-bit little-endian, stereo interleaved, 48000 Hz
+```bash
+build/fm_broadcast_player --stereo on --audio off | aplay -r 48000 -f S16_LE -c 2
 ```
 
 ## 10. 符号含义对照表
@@ -476,11 +476,11 @@ ALSA default device: signed 16-bit little-endian, stereo interleaved, 48000 Hz
 | $G$ | 音量增益 | `--volume`，默认 0.8 |
 | $a[m]$ | 音量缩放后的音频 | volume-scaled sample |
 | $c[m]$ | 限幅后的音频 | clamped sample in $[-1,1]$ |
-| $p[m]$ | signed 16-bit PCM 样本 | 写入 stdout 或 ALSA default device 的音频样本 |
+| $p[m]$ | signed 16-bit PCM 样本 | 写入 stdout 或 ALSA playback device 的音频样本 |
 
 ## 11. 当前实现的边界
 
-当前示例用于说明和收听普通 FM 广播，重点是算法清晰和依赖简单。它已经实现 `L+R` 单声道兼容解调和基于 19 kHz 导频的立体声 `L-R` 恢复，但没有实现 RDS/RBDS、自动频偏估计或自动增益优化。
+当前示例用于说明和收听普通 FM 广播，重点是算法清晰、依赖简单和实时播放。它已经实现 `L+R` 单声道兼容解调和基于 19 kHz 导频的立体声 `L-R` 恢复，但没有实现 RDS/RBDS、自动频偏估计或自动增益优化。默认关闭鉴频前 RF FIR，并使用近似正交鉴频以避免低性能机器产生音频 underrun；如果机器性能足够且需要更强邻台抑制，可使用 `--rf-filter on`。排查实时性能时可使用 `--stats on` 查看 `audio_rate` 是否接近 48000 frames/s。
 
 ## 12. Debug IQ 采集与离线分析
 

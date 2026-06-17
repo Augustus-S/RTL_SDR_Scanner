@@ -56,4 +56,8 @@ target_link_libraries(fm_broadcast_player PRIVATE
     spdlog::spdlog
 )
 
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(fm_broadcast_player PRIVATE -O3)
+endif()
+
 target_link_directories(fm_broadcast_player PRIVATE ${RTLSDR_LIBRARY_DIRS})

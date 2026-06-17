@@ -6,8 +6,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdio>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -18,15 +21,19 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace {
 
 constexpr std::uint32_t kDefaultDeviceIndex = 0;
-constexpr std::uint32_t kDefaultFrequencyHz = 100000000;
+constexpr std::uint32_t kDefaultFrequencyHz = 97700000;
 constexpr std::uint32_t kSdrSampleRate      = 1200000;
 constexpr std::uint32_t kAudioSampleRate    = 48000;
 constexpr int           kCompositeDecimation = 5;
@@ -46,6 +53,8 @@ constexpr double        kStereoSubcarrierHz = 38000.0;
 constexpr double        kFmDeviationHz      = 75000.0;
 constexpr std::uint32_t kAlsaLatencyUs      = 500000;
 constexpr std::size_t   kAudioPrebufferFrames = kAudioSampleRate / 2;
+constexpr std::size_t   kAudioQueueFrames   = kAudioSampleRate * 2;
+constexpr std::size_t   kAudioWriteChunkFrames = 4096;
 
 std::atomic_bool gStop{false};
 
@@ -83,19 +92,22 @@ struct Config {
     double        volume       = 0.8;
     double        deemphasisUs = 50.0;
     double        durationSec  = 0.0;
-    bool          audioOn      = false;
+    bool          audioOn      = true;
+    std::string   audioDevice  = "default";
     bool          offsetTuning = true;
-    bool          stereoOn     = true;
+    bool          stereoOn     = false;
+    bool          rfFilterOn   = false;
     bool          debugOn      = false;
+    bool          statsOn      = false;
     bool          listGains    = false;
     bool          captureIqOnly = false;
 };
 
 void printUsage(const char* argv0) {
     std::cerr
-        << "Usage: " << argv0 << " [options] > audio.s16le\n\n"
+        << "Usage: " << argv0 << " [options]\n\n"
         << "Options:\n"
-        << "  --freq <MHz>          FM broadcast frequency, default 100.0\n"
+        << "  --freq <MHz>          FM broadcast frequency, default 97.7\n"
         << "  --device <index>      RTL-SDR device index, default 0\n"
         << "  --gain <dB|auto>      Tuner gain in dB, default auto\n"
         << "  --list-gains          List supported tuner gains and exit\n"
@@ -103,16 +115,19 @@ void printUsage(const char* argv0) {
         << "  --volume <value>      Audio scale, default 0.8\n"
         << "  --deemphasis <us>     50 or 75, default 50\n"
         << "  --duration <sec>      Stop after seconds, default run until Ctrl-C\n"
-        << "  --audio <on|off>      Play through system default audio device, default off\n"
+        << "  --audio <on|off>      Play through system default audio device, default on\n"
+        << "  --audio-device <name> ALSA playback device, default default\n"
         << "  --offset <on|off>     Offset tune away from the RTL-SDR DC spike, default on\n"
-        << "  --stereo <on|off>     Decode FM stereo, default on\n"
+        << "  --stereo <on|off>     Decode FM stereo, default off\n"
+        << "  --rf-filter <on|off>  Run pre-discriminator RF FIR, default off\n"
+        << "  --stats <on|off>      Print lightweight throughput statistics, default off\n"
         << "  --debug <on|off>      Save IQ and print DSP statistics, default off\n"
         << "  --capture-iq-only <on|off>\n"
         << "                         With --debug on, save raw IQ without demodulating, default off\n"
         << "  --help, -h            Show this help\n\n"
         << "Play example:\n"
-        << "  " << argv0 << " --freq 100.0 --audio on\n"
-        << "  " << argv0 << " --freq 100.0 --audio off | aplay -r 48000 -f S16_LE -c 2\n";
+        << "  " << argv0 << "\n"
+        << "  " << argv0 << " --freq 97.7 --audio off | aplay -r 48000 -f S16_LE -c 1\n";
 }
 
 bool parseUint32(const char* text, std::uint32_t& value) {
@@ -182,6 +197,10 @@ bool parseArgs(int argc, char* argv[], Config& cfg) {
                 spdlog::error("--audio must be on or off");
                 return false;
             }
+        } else if (arg == "--audio-device") {
+            const char* value = needValue("--audio-device");
+            if (!value || std::strlen(value) == 0) return false;
+            cfg.audioDevice = value;
         } else if (arg == "--offset") {
             const char* value = needValue("--offset");
             if (!value) return false;
@@ -206,16 +225,41 @@ bool parseArgs(int argc, char* argv[], Config& cfg) {
                 spdlog::error("--stereo must be on or off");
                 return false;
             }
+        } else if (arg == "--rf-filter") {
+            const char* value = needValue("--rf-filter");
+            if (!value) return false;
+            std::string mode = value;
+            if (mode == "on") {
+                cfg.rfFilterOn = true;
+            } else if (mode == "off") {
+                cfg.rfFilterOn = false;
+            } else {
+                spdlog::error("--rf-filter must be on or off");
+                return false;
+            }
         } else if (arg == "--debug") {
             const char* value = needValue("--debug");
             if (!value) return false;
             std::string mode = value;
             if (mode == "on") {
                 cfg.debugOn = true;
+                cfg.statsOn = true;
             } else if (mode == "off") {
                 cfg.debugOn = false;
             } else {
                 spdlog::error("--debug must be on or off");
+                return false;
+            }
+        } else if (arg == "--stats") {
+            const char* value = needValue("--stats");
+            if (!value) return false;
+            std::string mode = value;
+            if (mode == "on") {
+                cfg.statsOn = true;
+            } else if (mode == "off") {
+                cfg.statsOn = false;
+            } else {
+                spdlog::error("--stats must be on or off");
                 return false;
             }
         } else if (arg == "--capture-iq-only") {
@@ -225,6 +269,7 @@ bool parseArgs(int argc, char* argv[], Config& cfg) {
             if (mode == "on") {
                 cfg.captureIqOnly = true;
                 cfg.debugOn = true;
+                cfg.statsOn = true;
             } else if (mode == "off") {
                 cfg.captureIqOnly = false;
             } else {
@@ -247,6 +292,10 @@ bool parseArgs(int argc, char* argv[], Config& cfg) {
     }
     if (cfg.captureIqOnly && cfg.audioOn) {
         spdlog::error("--capture-iq-only on cannot be combined with --audio on");
+        return false;
+    }
+    if (!cfg.audioOn && isatty(STDOUT_FILENO)) {
+        spdlog::error("--audio off writes raw PCM to stdout; redirect it or pipe it to a player");
         return false;
     }
     return true;
@@ -425,9 +474,14 @@ public:
         , diffFir_(makeLowPassFir(kAudioFirTaps, kAudioCutoffHz, kCompositeSampleRate))
         , diffRing_(kAudioFirTaps, 0.0)
         , mixerPhaseInc_(cfg.offsetTuning ? 2.0 * M_PI * kTuningOffsetHz / kSdrSampleRate : 0.0)
+        , mixerOscI_(1.0)
+        , mixerOscQ_(0.0)
+        , mixerStepI_(std::cos(mixerPhaseInc_))
+        , mixerStepQ_(std::sin(mixerPhaseInc_))
         , deemphasisAlpha_(1.0 / (1.0 + (cfg.deemphasisUs * 1e-6) * kAudioSampleRate))
         , pilotNominalPhaseInc_(2.0 * M_PI * kStereoPilotHz / kCompositeSampleRate)
         , stereoOn_(cfg.stereoOn)
+        , rfFilterOn_(cfg.rfFilterOn)
         , debugStats_(debugStats)
         , volume_(cfg.volume) {}
 
@@ -443,16 +497,30 @@ public:
             const double rawI = (static_cast<double>(iq[idx]) - 127.5) / 127.5;
             const double rawQ = (static_cast<double>(iq[idx + 1]) - 127.5) / 127.5;
             if (debugStats_) { debugStats_->addRaw(rawI, rawQ); }
-            const double cosPhase = std::cos(mixerPhase_);
-            const double sinPhase = std::sin(mixerPhase_);
-            const double i = rawI * cosPhase - rawQ * sinPhase;
-            const double q = rawI * sinPhase + rawQ * cosPhase;
+            const double i = rawI * mixerOscI_ - rawQ * mixerOscQ_;
+            const double q = rawI * mixerOscQ_ + rawQ * mixerOscI_;
 
-            mixerPhase_ += mixerPhaseInc_;
-            if (mixerPhase_ >= 2.0 * M_PI) mixerPhase_ -= 2.0 * M_PI;
+            const double nextOscI = mixerOscI_ * mixerStepI_ - mixerOscQ_ * mixerStepQ_;
+            const double nextOscQ = mixerOscI_ * mixerStepQ_ + mixerOscQ_ * mixerStepI_;
+            mixerOscI_ = nextOscI;
+            mixerOscQ_ = nextOscQ;
+            if (++mixerNormalizePhase_ >= 4096) {
+                const double mag = std::sqrt(mixerOscI_ * mixerOscI_ + mixerOscQ_ * mixerOscQ_);
+                if (mag > 0.0) {
+                    mixerOscI_ /= mag;
+                    mixerOscQ_ /= mag;
+                }
+                mixerNormalizePhase_ = 0;
+            }
 
-            pushRfSample(i, q);
-            const auto [filteredI, filteredQ] = rfOutput();
+            double filteredI = i;
+            double filteredQ = q;
+            if (rfFilterOn_) {
+                pushRfSample(i, q);
+                const auto filtered = rfOutput();
+                filteredI = filtered.first;
+                filteredQ = filtered.second;
+            }
             if (debugStats_) { debugStats_->addRf(filteredI, filteredQ); }
 
             if (!havePrev_) {
@@ -462,13 +530,12 @@ public:
                 continue;
             }
 
-            const double real  = filteredI * prevI_ + filteredQ * prevQ_;
             const double imag  = filteredQ * prevI_ - filteredI * prevQ_;
-            const double angle = std::atan2(imag, real);
+            const double power = filteredI * filteredI + filteredQ * filteredQ + 1e-12;
             prevI_             = filteredI;
             prevQ_             = filteredQ;
 
-            const double discriminator = angle * kSdrSampleRate / (2.0 * M_PI * kFmDeviationHz);
+            const double discriminator = (imag / power) * kSdrSampleRate / (2.0 * M_PI * kFmDeviationHz);
             if (debugStats_) { debugStats_->addDiscriminator(discriminator); }
             pushCompositeSample(discriminator);
             if (++compositeDecimPhase_ < kCompositeDecimation) continue;
@@ -476,18 +543,20 @@ public:
 
             const double composite = compositeOutput();
             if (debugStats_) { debugStats_->addComposite(composite); }
-            updatePilotPll(composite);
             pushSumSample(composite);
-            const double stereoDiffBaseband = 2.0 * composite * std::cos(2.0 * pilotPhase_);
-            pushDiffSample(stereoDiffBaseband);
+            if (stereoOn_) {
+                updatePilotPll(composite);
+                const double stereoDiffBaseband = 2.0 * composite * std::cos(2.0 * pilotPhase_);
+                pushDiffSample(stereoDiffBaseband);
+            }
             if (++audioDecimPhase_ < kAudioDecimation) continue;
             audioDecimPhase_ = 0;
 
             const double sum  = dcBlockSum(sumOutput());
-            const double diff = dcBlockDiff(diffOutput());
-            if (debugStats_) { debugStats_->addAudio(sum, diff); }
 
             if (stereoOn_) {
+                const double diff = dcBlockDiff(diffOutput());
+                if (debugStats_) { debugStats_->addAudio(sum, diff); }
                 double left  = 0.5 * (sum + diff);
                 double right = 0.5 * (sum - diff);
                 leftDeemphState_ += deemphasisAlpha_ * (left - leftDeemphState_);
@@ -497,6 +566,7 @@ public:
                 pcm.push_back(toPcm(left));
                 pcm.push_back(toPcm(right));
             } else {
+                if (debugStats_) { debugStats_->addAudio(sum, 0.0); }
                 monoDeemphState_ += deemphasisAlpha_ * (sum - monoDeemphState_);
                 const double mono = std::clamp(monoDeemphState_ * volume_, -1.0, 1.0);
                 pcm.push_back(toPcm(mono));
@@ -622,8 +692,12 @@ private:
     int                 compositeDecimPhase_ = 0;
     int                 audioDecimPhase_ = 0;
     bool                havePrev_ = false;
-    double              mixerPhase_ = 0.0;
     double              mixerPhaseInc_ = 0.0;
+    double              mixerOscI_ = 1.0;
+    double              mixerOscQ_ = 0.0;
+    double              mixerStepI_ = 1.0;
+    double              mixerStepQ_ = 0.0;
+    int                 mixerNormalizePhase_ = 0;
     double              prevI_ = 0.0;
     double              prevQ_ = 0.0;
     double              dcSumPrevX_ = 0.0;
@@ -638,36 +712,36 @@ private:
     double              pilotFreq_ = 0.0;
     double              pilotNominalPhaseInc_;
     bool                stereoOn_;
+    bool                rfFilterOn_;
     DebugStats*         debugStats_ = nullptr;
     double              volume_;
 };
 
 class AlsaAudioSink {
 public:
-    explicit AlsaAudioSink(int channels)
-        : channels_(channels) {
-        int err = snd_pcm_open(&pcm_, "default", SND_PCM_STREAM_PLAYBACK, 0);
-        if (err < 0) {
-            spdlog::error("Failed to open default ALSA playback device: {}", snd_strerror(err));
+    AlsaAudioSink(int channels, std::string requestedDevice)
+        : channels_(channels)
+        , requestedDevice_(std::move(requestedDevice)) {
+        if (openDevice(requestedDevice_)) {
+            startWorker();
             return;
         }
 
-        err = snd_pcm_set_params(pcm_,
-                                 SND_PCM_FORMAT_S16_LE,
-                                 SND_PCM_ACCESS_RW_INTERLEAVED,
-                                 channels_,
-                                 kAudioSampleRate,
-                                 1,
-                                 kAlsaLatencyUs);
-        if (err < 0) {
-            spdlog::error("Failed to configure ALSA playback device: {}", snd_strerror(err));
-            snd_pcm_close(pcm_);
-            pcm_ = nullptr;
-            return;
+        if (requestedDevice_ == "default" && lastOpenError_ == -EHOSTDOWN) {
+            spdlog::warn("ALSA device 'default' is unavailable. This often happens when running with sudo while the desktop audio server belongs to the normal user.");
+            for (const char* fallback : {"sysdefault", "plughw:0,0"}) {
+                spdlog::info("Trying ALSA fallback device '{}'", fallback);
+                if (openDevice(fallback)) {
+                    startWorker();
+                    return;
+                }
+            }
+            spdlog::error("No ALSA fallback device opened. Try running without sudo after fixing RTL-SDR permissions, or pass --audio-device <name> from `aplay -L`.");
         }
     }
 
     ~AlsaAudioSink() {
+        stopWorker();
         if (!pcm_) return;
         snd_pcm_drain(pcm_);
         snd_pcm_close(pcm_);
@@ -681,6 +755,45 @@ public:
     }
 
     bool write(const std::int16_t* samples, std::size_t frames) {
+        if (!pcm_ || workerFailed_.load()) return false;
+        if (frames == 0) return true;
+
+        const auto sampleCount = frames * static_cast<std::size_t>(channels_);
+        const auto maxSamples  = kAudioQueueFrames * static_cast<std::size_t>(channels_);
+        std::unique_lock<std::mutex> lock(queueMutex_);
+
+        const std::int16_t* begin = samples;
+        const std::int16_t* end   = samples + sampleCount;
+        if (sampleCount > maxSamples) {
+            begin = end - maxSamples;
+            droppedFrames_ += (sampleCount - maxSamples) / static_cast<std::size_t>(channels_);
+        }
+
+        const auto incomingSamples = static_cast<std::size_t>(end - begin);
+        const auto queuedSamples = audioQueue_.size() - audioQueueReadPos_;
+        if (queuedSamples + incomingSamples > maxSamples) {
+            const auto samplesToDrop = queuedSamples + incomingSamples - maxSamples;
+            audioQueueReadPos_ += samplesToDrop;
+            droppedFrames_ += samplesToDrop / static_cast<std::size_t>(channels_);
+            compactQueueIfNeeded();
+        }
+
+        if (droppedFrames_ != lastReportedDroppedFrames_) {
+            const auto newlyDropped = droppedFrames_ - lastReportedDroppedFrames_;
+            if (lastReportedDroppedFrames_ == 0 || newlyDropped >= kAudioSampleRate) {
+                spdlog::warn("Dropped {} queued audio frames to keep RTL-SDR reads real-time", droppedFrames_);
+                lastReportedDroppedFrames_ = droppedFrames_;
+            }
+        }
+
+        audioQueue_.insert(audioQueue_.end(), begin, end);
+        lock.unlock();
+        queueCv_.notify_one();
+        return true;
+    }
+
+private:
+    bool writeBlocking(const std::int16_t* samples, std::size_t frames) {
         std::size_t offset = 0;
         while (offset < frames) {
             snd_pcm_sframes_t written = snd_pcm_writei(pcm_, samples + offset * channels_, frames - offset);
@@ -710,16 +823,101 @@ public:
         return true;
     }
 
-private:
+    bool openDevice(const std::string& deviceName) {
+        lastOpenError_ = snd_pcm_open(&pcm_, deviceName.c_str(), SND_PCM_STREAM_PLAYBACK, 0);
+        if (lastOpenError_ < 0) {
+            spdlog::error("Failed to open ALSA playback device '{}': {}", deviceName, snd_strerror(lastOpenError_));
+            pcm_ = nullptr;
+            return false;
+        }
+
+        const int err = snd_pcm_set_params(pcm_,
+                                           SND_PCM_FORMAT_S16_LE,
+                                           SND_PCM_ACCESS_RW_INTERLEAVED,
+                                           channels_,
+                                           kAudioSampleRate,
+                                           1,
+                                           kAlsaLatencyUs);
+        if (err < 0) {
+            spdlog::error("Failed to configure ALSA playback device '{}': {}", deviceName, snd_strerror(err));
+            snd_pcm_close(pcm_);
+            pcm_ = nullptr;
+            return false;
+        }
+
+        spdlog::info("Opened ALSA playback device '{}'", deviceName);
+        return true;
+    }
+
+    void startWorker() {
+        audioQueue_.reserve(kAudioQueueFrames * static_cast<std::size_t>(channels_));
+        worker_ = std::thread([this] { workerLoop(); });
+    }
+
+    void stopWorker() {
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            stopWorker_ = true;
+        }
+        queueCv_.notify_one();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    void workerLoop() {
+        std::vector<std::int16_t> chunk;
+        chunk.reserve(kAudioWriteChunkFrames * static_cast<std::size_t>(channels_));
+
+        while (true) {
+            {
+                std::unique_lock<std::mutex> lock(queueMutex_);
+                queueCv_.wait(lock, [this] { return stopWorker_ || audioQueueReadPos_ < audioQueue_.size(); });
+                if (stopWorker_ && audioQueueReadPos_ >= audioQueue_.size()) break;
+
+                const auto maxSamples = kAudioWriteChunkFrames * static_cast<std::size_t>(channels_);
+                const auto queuedSamples = audioQueue_.size() - audioQueueReadPos_;
+                const auto samplesToWrite = std::min(maxSamples, queuedSamples);
+                chunk.assign(audioQueue_.begin() + static_cast<std::ptrdiff_t>(audioQueueReadPos_),
+                             audioQueue_.begin() + static_cast<std::ptrdiff_t>(audioQueueReadPos_ + samplesToWrite));
+                audioQueueReadPos_ += samplesToWrite;
+                compactQueueIfNeeded();
+            }
+
+            const auto frames = chunk.size() / static_cast<std::size_t>(channels_);
+            if (!writeBlocking(chunk.data(), frames)) {
+                workerFailed_.store(true);
+                break;
+            }
+        }
+    }
+
+    void compactQueueIfNeeded() {
+        if (audioQueueReadPos_ == 0) return;
+        if (audioQueueReadPos_ < audioQueue_.size() / 2 && audioQueueReadPos_ < kAudioQueueFrames) return;
+        audioQueue_.erase(audioQueue_.begin(), audioQueue_.begin() + static_cast<std::ptrdiff_t>(audioQueueReadPos_));
+        audioQueueReadPos_ = 0;
+    }
+
     snd_pcm_t* pcm_          = nullptr;
     int        channels_     = 1;
+    std::string requestedDevice_;
+    int        lastOpenError_ = 0;
     std::size_t underrunCount_ = 0;
+    std::vector<std::int16_t> audioQueue_;
+    std::size_t audioQueueReadPos_ = 0;
+    std::mutex queueMutex_;
+    std::condition_variable queueCv_;
+    std::thread worker_;
+    bool stopWorker_ = false;
+    std::atomic_bool workerFailed_{false};
+    std::size_t droppedFrames_ = 0;
+    std::size_t lastReportedDroppedFrames_ = 0;
 };
 
 bool configureDevice(rtlsdr_dev_t* dev, const Config& cfg) {
     int ret = rtlsdr_set_sample_rate(dev, kSdrSampleRate);
     if (ret < 0) {
         spdlog::error("Failed to set sample rate {}: error {}", kSdrSampleRate, ret);
+        spdlog::error("RTL-SDR control transfer failed. If this happens without sudo, fix udev permissions; if it persists, unplug and replug the dongle and ensure no other RTL-SDR process is running.");
         return false;
     }
     const std::uint32_t tunerFrequencyHz =
@@ -813,6 +1011,10 @@ int main(int argc, char* argv[]) {
         printUsage(argv[0]);
         return 2;
     }
+    if (!cfg.audioOn) {
+        static std::vector<char> stdoutBuffer(1024 * 1024);
+        std::setvbuf(stdout, stdoutBuffer.data(), _IOFBF, stdoutBuffer.size());
+    }
 
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
@@ -840,7 +1042,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    DebugStats debugStats(cfg.debugOn);
+    DebugStats debugStats(cfg.debugOn || cfg.statsOn);
 
     std::ofstream iqDump;
     if (cfg.debugOn) {
@@ -860,18 +1062,19 @@ int main(int argc, char* argv[]) {
     WbfmDemodulator demod(cfg, cfg.debugOn ? &debugStats : nullptr);
     const int       outputChannels = demod.outputChannels();
 
-    spdlog::info("Receiving WBFM at {:.3f} MHz, {} S/s -> {} Hz {}ch s16le, audio {}, offset tuning {}, stereo {}. Press Ctrl-C to stop.",
+    spdlog::info("Receiving WBFM at {:.3f} MHz, {} S/s -> {} Hz {}ch s16le, audio {}, offset tuning {}, stereo {}, rf filter {}. Press Ctrl-C to stop.",
                  cfg.frequencyHz / 1000000.0,
                  kSdrSampleRate,
                  kAudioSampleRate,
                  outputChannels,
                  cfg.audioOn ? "on" : "off",
                  cfg.offsetTuning ? "on" : "off",
-                 cfg.stereoOn ? "on" : "off");
+                 cfg.stereoOn ? "on" : "off",
+                 cfg.rfFilterOn ? "on" : "off");
 
     std::unique_ptr<AlsaAudioSink> audioSink;
     if (cfg.audioOn) {
-        audioSink = std::make_unique<AlsaAudioSink>(outputChannels);
+        audioSink = std::make_unique<AlsaAudioSink>(outputChannels, cfg.audioDevice);
         if (!audioSink->isOpen()) {
             rtlsdr_close(dev);
             return 1;
@@ -900,13 +1103,15 @@ int main(int argc, char* argv[]) {
             break;
         }
         if (nRead <= 0) continue;
+        if (cfg.statsOn) {
+            debugStats.addIqBytes(static_cast<std::size_t>(nRead));
+        }
         if (cfg.debugOn) {
             iqDump.write(reinterpret_cast<const char*>(iq.data()), nRead);
             if (!iqDump) {
                 spdlog::error("Failed to write IQ dump");
                 break;
             }
-            debugStats.addIqBytes(static_cast<std::size_t>(nRead));
             capturedIqBytes += static_cast<std::uint64_t>(nRead);
         }
 
@@ -918,7 +1123,7 @@ int main(int argc, char* argv[]) {
 
         demod.processIq(iq.data(), nRead, pcm);
         if (pcm.empty()) continue;
-        if (cfg.debugOn) { debugStats.addPcm(pcm, outputChannels); }
+        if (cfg.statsOn) { debugStats.addPcm(pcm, outputChannels); }
 
         const auto pendingAudioFrames = cfg.audioOn && !audioStarted ? audioPrebuffer.size() / outputChannels : 0;
         const auto pcmFrames = pcm.size() / outputChannels;
@@ -952,13 +1157,12 @@ int main(int argc, char* argv[]) {
         if (cfg.audioOn) {
             if (!audioSink->write(pcm.data(), framesToWrite)) break;
         } else {
-            std::cout.write(reinterpret_cast<const char*>(pcm.data()),
-                            static_cast<std::streamsize>(pcm.size() * sizeof(std::int16_t)));
-            if (!std::cout) break;
+            const auto samplesWritten = std::fwrite(pcm.data(), sizeof(std::int16_t), pcm.size(), stdout);
+            if (samplesWritten != pcm.size()) break;
         }
         writtenAudioFrames += framesToWrite;
 
-        if (cfg.debugOn) { debugStats.reportIfDue(kSdrSampleRate, kAudioSampleRate); }
+        if (cfg.statsOn) { debugStats.reportIfDue(kSdrSampleRate, kAudioSampleRate); }
 
         if (maxAudioFrames > 0 && writtenAudioFrames >= maxAudioFrames) break;
     }
