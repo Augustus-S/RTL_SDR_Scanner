@@ -19,8 +19,8 @@
 运行方式：
 
 ```bash
-python3 simulation/fm_modulation.py
-python3 simulation/fm_demodulation.py
+python3 simulation/fm/fm_modulation.py
+python3 simulation/fm/fm_demodulation.py
 ```
 
 ## 2. 系统参数

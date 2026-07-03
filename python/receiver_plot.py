@@ -171,11 +171,12 @@ class SpectrumPlotter:
 
         rbw_hz = (frame.end_hz - frame.start_hz) / max(data.size - 1, 1)
         fm_count = sum(1 for det in frame.detections if isinstance(det, dict) and det.get("type") == "fm_spec")
+        am_count = sum(1 for det in frame.detections if isinstance(det, dict) and det.get("type") == "am_spec")
         self.info_box.set_text(
             f"Range: {start_mhz:.3f}-{end_mhz:.3f} MHz\n"
             f"Bins: {data.size}  RBW: {format_hz(rbw_hz)}\n"
             f"Peak: {peak_db:.1f} dBFS @ {peak_freq:.4f} MHz\n"
-            f"Noise floor: {noise:.1f} dBFS  FM labels: {fm_count}\n"
+            f"Noise floor: {noise:.1f} dBFS  FM labels: {fm_count}  AM labels: {am_count}\n"
             f"Updated: {frame.received_at:%H:%M:%S}"
         )
 
@@ -244,7 +245,7 @@ class SpectrumPlotter:
             return
 
         for det in detections:
-            if not isinstance(det, dict) or det.get("type") != "fm_spec":
+            if not isinstance(det, dict) or det.get("type") not in {"fm_spec", "am_spec"}:
                 continue
 
             start_hz = det.get("start_freq")
@@ -257,15 +258,20 @@ class SpectrumPlotter:
             if end_mhz <= start_mhz:
                 continue
 
+            is_am = det.get("type") == "am_spec"
+            edge_color = "#ff7f0e" if is_am else "#d62728"
+            signal_name = "AM" if is_am else "FM"
+            legend_label = "AM detection" if is_am else "FM detection"
+
             rect = Rectangle(
                 (start_mhz, y_bottom),
                 end_mhz - start_mhz,
                 height,
                 fill=False,
-                edgecolor="#d62728",
+                edgecolor=edge_color,
                 linewidth=1.6,
                 alpha=0.95,
-                label="FM detection",
+                label=legend_label,
             )
             self.ax.add_patch(rect)
             self.annotation_artists.append(rect)
@@ -277,15 +283,24 @@ class SpectrumPlotter:
             flags = []
             if det.get("verified"):
                 flags.append("verified")
-            if det.get("stereo"):
+            if not is_am and det.get("stereo"):
                 flags.append("stereo")
-            if det.get("rds"):
+            if not is_am and det.get("rds"):
                 flags.append("RDS")
             suffix = f" ({', '.join(flags)})" if flags else ""
-            label = (
-                f"FM {center_mhz:.3f} MHz{suffix}\n"
-                f"BW {bw_khz:.0f} kHz  SNR {snr_db:.1f} dB  C {confidence:.2f}"
-            )
+            if is_am:
+                audio_snr = float(det.get("audio_snr_db", 0.0))
+                depth = float(det.get("modulation_depth", 0.0))
+                label = (
+                    f"{signal_name} {center_mhz:.3f} MHz{suffix}\n"
+                    f"BW {bw_khz:.0f} kHz  SNR {snr_db:.1f} dB  AM {depth:.2f}\n"
+                    f"Audio {audio_snr:.1f} dB  C {confidence:.2f}"
+                )
+            else:
+                label = (
+                    f"{signal_name} {center_mhz:.3f} MHz{suffix}\n"
+                    f"BW {bw_khz:.0f} kHz  SNR {snr_db:.1f} dB  C {confidence:.2f}"
+                )
             text = self.ax.annotate(
                 label,
                 xy=(center_mhz, y_top - height * 0.08),
@@ -294,8 +309,8 @@ class SpectrumPlotter:
                 ha="center",
                 va="top",
                 fontsize=8,
-                color="#d62728",
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#d62728", alpha=0.8),
+                color=edge_color,
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor=edge_color, alpha=0.8),
             )
             self.annotation_artists.append(text)
 

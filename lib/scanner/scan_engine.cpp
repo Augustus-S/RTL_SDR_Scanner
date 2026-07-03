@@ -36,6 +36,23 @@ void smoothDetection(FmDetection& target, const FmDetection& current) {
     target.rds         = current.rds || target.rds;
 }
 
+void smoothDetection(AmDetection& target, const AmDetection& current) {
+    target.startFreqHz     = smoothValue(target.startFreqHz, current.startFreqHz);
+    target.endFreqHz       = smoothValue(target.endFreqHz, current.endFreqHz);
+    target.centerHz        = smoothValue(target.centerHz, current.centerHz);
+    target.bandwidthHz     = smoothValue(target.bandwidthHz, current.bandwidthHz);
+    target.peakDb          = smoothValue(target.peakDb, current.peakDb);
+    target.avgDb           = smoothValue(target.avgDb, current.avgDb);
+    target.noiseDb         = smoothValue(target.noiseDb, current.noiseDb);
+    target.snrDb           = smoothValue(target.snrDb, current.snrDb);
+    target.confidence      = smoothValue(target.confidence, current.confidence);
+    target.audioSnrDb      = smoothValue(target.audioSnrDb, current.audioSnrDb);
+    target.modulationDepth = smoothValue(target.modulationDepth, current.modulationDepth);
+    target.carrierSnrDb    = smoothValue(target.carrierSnrDb, current.carrierSnrDb);
+    target.fmRmsHz         = smoothValue(target.fmRmsHz, current.fmRmsHz);
+    target.verified        = current.verified || target.verified;
+}
+
 } // namespace
 
 ScanEngine::ScanEngine(rtlsdr_dev_t* dev, rtl::tools::Pusher& pusher)
@@ -89,6 +106,7 @@ ScanEngine::SweepResult ScanEngine::doOneSweep(const std::function<bool()>& shou
     auto                     sweep_start = std::chrono::steady_clock::now();
     std::vector<SegmentData> segments;
     currentFmDetections_.clear();
+    currentAmDetections_.clear();
 
     for (std::uint32_t cur_freq = sweep_start_freq;
          cur_freq <= sweep_end_freq && running_ && (!shouldContinue || shouldContinue());
@@ -161,6 +179,14 @@ bool ScanEngine::processOneHop(std::uint32_t centerFreq, int directSampling, std
         n_read,
         static_cast<double>(centerFreq));
     currentFmDetections_.insert(currentFmDetections_.end(), detections.begin(), detections.end());
+    auto amDetections = amDetector_.detectInIqSegment(
+        spectrum_db,
+        static_cast<double>(centerFreq) - static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+        static_cast<double>(centerFreq) + static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+        bufferU8_.data(),
+        n_read,
+        static_cast<double>(centerFreq));
+    currentAmDetections_.insert(currentAmDetections_.end(), amDetections.begin(), amDetections.end());
     segments.push_back({std::move(spectrum_db), static_cast<double>(centerFreq)});
     return true;
 }
@@ -215,6 +241,40 @@ void ScanEngine::spliceAndPush(
         item["papr_db"]      = detection.paprDb;
         item["am_variance"]  = detection.amVariance;
         item["fm_rms_hz"]    = detection.fmRmsHz;
+        result_arr.push_back(std::move(item));
+    }
+
+    std::sort(currentAmDetections_.begin(), currentAmDetections_.end(), [](const auto& a, const auto& b) {
+        if (a.centerHz == b.centerHz) return a.confidence > b.confidence;
+        return a.centerHz < b.centerHz;
+    });
+    std::vector<AmDetection> dedupedAm;
+    for (const auto& detection : currentAmDetections_) {
+        if (!dedupedAm.empty() && std::abs(dedupedAm.back().centerHz - detection.centerHz) < 30000.0) {
+            if (detection.confidence > dedupedAm.back().confidence) { dedupedAm.back() = detection; }
+            continue;
+        }
+        dedupedAm.push_back(detection);
+    }
+    dedupedAm = updateAmTracks(std::move(dedupedAm));
+
+    for (const auto& detection : dedupedAm) {
+        nlohmann::json item;
+        item["type"]             = "am_spec";
+        item["cf"]               = detection.centerHz;
+        item["start_freq"]       = detection.startFreqHz;
+        item["end_freq"]         = detection.endFreqHz;
+        item["bw"]               = detection.bandwidthHz;
+        item["peak_db"]          = detection.peakDb;
+        item["avg_db"]           = detection.avgDb;
+        item["noise_db"]         = detection.noiseDb;
+        item["snr_db"]           = detection.snrDb;
+        item["confidence"]       = detection.confidence;
+        item["verified"]         = detection.verified;
+        item["audio_snr_db"]     = detection.audioSnrDb;
+        item["modulation_depth"] = detection.modulationDepth;
+        item["carrier_snr_db"]   = detection.carrierSnrDb;
+        item["fm_rms_hz"]        = detection.fmRmsHz;
         result_arr.push_back(std::move(item));
     }
 
@@ -294,6 +354,69 @@ std::vector<FmDetection> ScanEngine::updateFmTracks(std::vector<FmDetection> det
 
     std::vector<FmDetection> stable;
     for (const auto& track : fmTracks_) {
+        if (track.visible && track.misses < DROP_MISSES) stable.push_back(track.detection);
+    }
+    std::sort(stable.begin(), stable.end(), [](const auto& a, const auto& b) {
+        return a.centerHz < b.centerHz;
+    });
+    return stable;
+}
+
+std::vector<AmDetection> ScanEngine::updateAmTracks(std::vector<AmDetection> detections) {
+    constexpr double TRACK_MATCH_HZ       = 35000.0;
+    constexpr double NEW_TRACK_CONFIDENCE = 0.38;
+    constexpr int    SHOW_HITS            = 1;
+    constexpr int    DROP_MISSES          = 4;
+
+    std::vector<char> matched(amTracks_.size(), 0);
+
+    for (const auto& detection : detections) {
+        int    bestIndex = -1;
+        double bestDist  = TRACK_MATCH_HZ;
+        for (int i = 0; i < static_cast<int>(amTracks_.size()); ++i) {
+            const double dist =
+                std::abs(amTracks_[static_cast<std::size_t>(i)].detection.centerHz - detection.centerHz);
+            if (dist < bestDist) {
+                bestDist  = dist;
+                bestIndex = i;
+            }
+        }
+
+        if (bestIndex >= 0) {
+            auto& track = amTracks_[static_cast<std::size_t>(bestIndex)];
+            smoothDetection(track.detection, detection);
+            track.hits   += 1;
+            track.misses  = 0;
+            track.visible = track.visible || track.hits >= SHOW_HITS || track.detection.confidence >= 0.48;
+            matched[static_cast<std::size_t>(bestIndex)] = 1;
+        } else if (detection.confidence >= NEW_TRACK_CONFIDENCE) {
+            AmTrack track;
+            track.detection = detection;
+            track.hits      = 1;
+            track.misses    = 0;
+            track.visible   = detection.confidence >= 0.48;
+            amTracks_.push_back(track);
+            matched.push_back(1);
+        }
+    }
+
+    for (std::size_t i = 0; i < amTracks_.size(); ++i) {
+        if (i < matched.size() && matched[i]) continue;
+        amTracks_[i].misses              += 1;
+        amTracks_[i].detection.confidence = std::max(amTracks_[i].detection.confidence - 0.06, 0.0);
+    }
+
+    amTracks_.erase(
+        std::remove_if(
+            amTracks_.begin(),
+            amTracks_.end(),
+            [](const AmTrack& track) {
+                return track.misses >= DROP_MISSES || track.detection.confidence < 0.20;
+            }),
+        amTracks_.end());
+
+    std::vector<AmDetection> stable;
+    for (const auto& track : amTracks_) {
         if (track.visible && track.misses < DROP_MISSES) stable.push_back(track.detection);
     }
     std::sort(stable.begin(), stable.end(), [](const auto& a, const auto& b) {

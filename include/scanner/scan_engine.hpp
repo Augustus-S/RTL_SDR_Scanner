@@ -8,6 +8,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include "scanner/am_detector.hpp"
 #include "scanner/fm_detector.hpp"
 #include "scanner/persistent_async_reader.hpp"
 #include "scanner/types.hpp"
@@ -51,6 +52,13 @@ private:
         bool        visible = false;
     };
 
+    struct AmTrack {
+        AmDetection detection;
+        int         hits    = 0;
+        int         misses  = 0;
+        bool        visible = false;
+    };
+
     bool processOneHop(std::uint32_t centerFreq, int directSampling, std::vector<SegmentData>& segments);
     void spliceAndPush(
         const std::vector<SegmentData>& segments,
@@ -58,10 +66,12 @@ private:
         std::uint32_t                   sweepEndFreq,
         const std::function<bool()>&    shouldContinue);
     std::vector<FmDetection> updateFmTracks(std::vector<FmDetection> detections);
+    std::vector<AmDetection> updateAmTracks(std::vector<AmDetection> detections);
 
     rtlsdr_dev_t*         dev_;
     rtl::tools::Pusher&   pusher_;
     rtl::tools::FftEngine fftEngine_;
+    AMDetector            amDetector_;
     FMDetector            fmDetector_;
 
     std::atomic<bool>          running_{false};
@@ -72,7 +82,9 @@ private:
     std::vector<std::complex<short>>       bufferIQ_;
     std::vector<short>                     bufferQ_;
     std::vector<FmDetection>               currentFmDetections_;
+    std::vector<AmDetection>               currentAmDetections_;
     std::vector<FmTrack>                   fmTracks_;
+    std::vector<AmTrack>                   amTracks_;
     std::unique_ptr<PersistentAsyncReader> reader_;
 };
 
