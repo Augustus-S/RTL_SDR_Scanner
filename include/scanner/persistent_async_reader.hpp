@@ -100,6 +100,7 @@ private:
     std::atomic<bool> running_{false};
 
     static constexpr int         STABILIZE_MS   = 20;
+    static constexpr int         TUNE_SETTLE_MS = 50;
     static constexpr std::size_t MAX_READ_BYTES = 2 * 1024 * 1024;
 };
 

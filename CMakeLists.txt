@@ -20,6 +20,7 @@ add_executable(${PROJECT_NAME}
     lib/tools/fft_engine.cpp
     lib/scanner/rtl_sdr_device.cpp
     lib/scanner/persistent_async_reader.cpp
+    lib/scanner/fm_detector.cpp
     lib/scanner/scan_engine.cpp
     lib/ads_b/ads_b_demodulator.cpp
     lib/ads_b/adsb_engine.cpp

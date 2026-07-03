@@ -8,6 +8,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include "scanner/fm_detector.hpp"
 #include "scanner/persistent_async_reader.hpp"
 #include "scanner/types.hpp"
 #include "tools/fft_engine.hpp"
@@ -43,13 +44,25 @@ public:
     SweepResult doOneSweep(const std::function<bool()>& shouldContinue = {});
 
 private:
+    struct FmTrack {
+        FmDetection detection;
+        int         hits    = 0;
+        int         misses  = 0;
+        bool        visible = false;
+    };
+
     bool processOneHop(std::uint32_t centerFreq, int directSampling, std::vector<SegmentData>& segments);
     void spliceAndPush(
-        const std::vector<SegmentData>& segments, std::uint32_t sweepStartFreq, std::uint32_t sweepEndFreq);
+        const std::vector<SegmentData>& segments,
+        std::uint32_t                   sweepStartFreq,
+        std::uint32_t                   sweepEndFreq,
+        const std::function<bool()>&    shouldContinue);
+    std::vector<FmDetection> updateFmTracks(std::vector<FmDetection> detections);
 
     rtlsdr_dev_t*         dev_;
     rtl::tools::Pusher&   pusher_;
     rtl::tools::FftEngine fftEngine_;
+    FMDetector            fmDetector_;
 
     std::atomic<bool>          running_{false};
     std::atomic<std::uint32_t> startFreq_{0};
@@ -58,6 +71,8 @@ private:
     std::vector<std::uint8_t>              bufferU8_;
     std::vector<std::complex<short>>       bufferIQ_;
     std::vector<short>                     bufferQ_;
+    std::vector<FmDetection>               currentFmDetections_;
+    std::vector<FmTrack>                   fmTracks_;
     std::unique_ptr<PersistentAsyncReader> reader_;
 };
 

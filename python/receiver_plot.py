@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-RTL-SDR 频谱图接收脚本
-监听 127.0.0.1:235678，绘制实时频谱图
+Receive RTL_SDR_Scanner JSON data and plot live spectrum data.
+
+Default endpoint:
+    http://127.0.0.1:23568/api/service
 """
 
+import argparse
 import json
 import logging
-import sys
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import numpy as np
 import matplotlib
+
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Cursor
+import numpy as np
+from matplotlib.patches import Rectangle
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,312 +30,430 @@ logging.basicConfig(
 logger = logging.getLogger("receiver_plot")
 
 
-class SpectrumPlotter:
+@dataclass
+class SpectrumFrame:
+    start_hz: float = 0.0
+    end_hz: float = 0.0
+    spectrum: list[float] = field(default_factory=list)
+    detections: list[dict] = field(default_factory=list)
+    received_at: datetime = field(default_factory=datetime.now)
 
+
+class SharedState:
     def __init__(self):
-        self.fig, (self.ax_spectrum, self.ax_info) = plt.subplots(
-            2, 1,
-            figsize=(16, 8),
-            gridspec_kw={"height_ratios": [5, 1]},
+        self._lock = threading.Lock()
+        self._frame: SpectrumFrame | None = None
+        self._dirty = False
+
+    def update(self, frame: SpectrumFrame) -> None:
+        with self._lock:
+            self._frame = frame
+            self._dirty = True
+
+    def take_if_dirty(self) -> SpectrumFrame | None:
+        with self._lock:
+            if not self._dirty:
+                return None
+            self._dirty = False
+            return self._frame
+
+
+class SpectrumPlotter:
+    def __init__(self, state: SharedState, refresh_ms: int, history_size: int):
+        self.state = state
+        self.refresh_ms = refresh_ms
+        self.history_size = history_size
+        self.annotation_artists = []
+        self.last_frame: SpectrumFrame | None = None
+        self.waterfall_data: list[np.ndarray] = []
+        self.waterfall_shape: tuple[int, float, float] | None = None
+
+        self.fig, (self.ax, self.ax_waterfall) = plt.subplots(
+            2,
+            1,
+            figsize=(15, 9),
+            gridspec_kw={"height_ratios": [3, 2]},
+            sharex=True,
         )
         self.fig.canvas.manager.set_window_title("RTL-SDR Spectrum Scanner")
 
-        self.spectrum_line = None
-        self.annotation = None
-        self.latest_data = None
-        self.latest_start = None
-        self.latest_end = None
-        self.need_redraw = False
+        (self.spectrum_line,) = self.ax.plot([], [], color="#1f77b4", linewidth=0.8, label="Spectrum")
+        (self.noise_line,) = self.ax.plot([], [], color="#6c757d", linestyle="--", linewidth=1.0, label="Noise floor")
+        (self.peak_marker,) = self.ax.plot([], [], marker="o", color="#111111", linestyle="None", markersize=5, label="Peak")
 
-        self._setup_spectrum_axes()
-        self._setup_info_panel()
-        self._setup_cursor_tracking()
-
-        plt.tight_layout()
-        self.fig.canvas.mpl_connect("close_event", self._on_close)
-
-    def _setup_spectrum_axes(self):
-        ax = self.ax_spectrum
-        ax.set_xlabel("Frequency (MHz)")
-        ax.set_ylabel("Power (dBFS)")
-        ax.set_title("RTL-SDR Spectrum")
-        ax.grid(True, alpha=0.3, linestyle="--")
-        ax.set_ylim(-120, 0)
-        ax.set_xlim(0, 1)
-
-        self.spectrum_line, = ax.plot([], [], "b-", linewidth=0.3, alpha=0.85)
-        self.annotation = ax.annotate(
-            "", xy=(0, 0), xytext=(15, 15), textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="lightyellow", alpha=0.9),
+        self.info_box = self.ax.text(
+            0.01,
+            0.98,
+            "Waiting for scan_data...",
+            transform=self.ax.transAxes,
+            va="top",
+            ha="left",
             fontsize=9,
-            arrowprops=dict(arrowstyle="->", color="gray"),
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="white", edgecolor="#bbbbbb", alpha=0.85),
         )
-        self.annotation.set_visible(False)
-
-    def _setup_info_panel(self):
-        ax = self.ax_info
-        ax.axis("off")
-        self.info_text = ax.text(
-            0.5, 0.5, "Waiting for scan data...",
-            transform=ax.transAxes,
-            fontsize=11,
-            fontfamily="monospace",
-            ha="center",
-            va="center",
-            bbox=dict(boxstyle="round,pad=0.6", facecolor="#f0f0f0", alpha=0.8),
+        self.coord_box = self.ax.text(
+            0.99,
+            0.02,
+            "",
+            transform=self.ax.transAxes,
+            va="bottom",
+            ha="right",
+            fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#fff8dc", edgecolor="#d0b85a", alpha=0.85),
         )
 
-    def _setup_cursor_tracking(self):
-        self.cursor = Cursor(
-            self.ax_spectrum,
-            useblit=True,
-            color="red",
-            linewidth=0.8,
-            linestyle="--",
-        )
+        self.ax.set_title("RTL-SDR Spectrum")
+        self.ax.set_xlabel("Frequency (MHz)")
+        self.ax.set_ylabel("Power (dBFS)")
+        self.ax.grid(True, which="major", linestyle="--", linewidth=0.6, alpha=0.35)
+        self.ax.grid(True, which="minor", linestyle=":", linewidth=0.4, alpha=0.25)
+        self.ax.minorticks_on()
+        self.ax.legend(loc="lower left")
 
+        self.waterfall = self.ax_waterfall.imshow(
+            np.zeros((1, 1)),
+            aspect="auto",
+            interpolation="nearest",
+            origin="upper",
+            cmap="viridis",
+        )
+        self.colorbar = self.fig.colorbar(self.waterfall, ax=self.ax_waterfall, pad=0.01)
+        self.colorbar.set_label("Power (dBFS)")
+        self.ax_waterfall.set_title("Waterfall / Time-Frequency")
+        self.ax_waterfall.set_xlabel("Frequency (MHz)")
+        self.ax_waterfall.set_ylabel("Recent sweeps")
         self.fig.canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
 
-    def _on_mouse_move(self, event):
-        if event.inaxes != self.ax_spectrum:
-            self.annotation.set_visible(False)
-            self.fig.canvas.draw_idle()
-            return
-
-        if self.latest_data is None:
-            return
-
-        x = event.xdata
-        if x is None:
-            return
-
-        start = self.latest_start
-        end = self.latest_end
-        spectrum = self.latest_data
-        if start is None or end is None or spectrum is None or len(spectrum) == 0:
-            return
-
-        n = len(spectrum)
-        if n < 2:
-            return
-
-        bin_width = (end - start) / n
-        idx = int((x - start) / bin_width)
-        if idx < 0 or idx >= n:
-            self.annotation.set_visible(False)
-            self.fig.canvas.draw_idle()
-            return
-
-        freq = start + idx * bin_width
-        power = spectrum[idx]
-
-        self.annotation.xy = (x, power)
-        self.annotation.set_text(f"  {freq:.4f} MHz\n  {power:.2f} dBFS")
-        self.annotation.set_visible(True)
-        self.fig.canvas.draw_idle()
-
-    def update(self, start_freq, end_freq, spectrum):
-        if not spectrum or len(spectrum) == 0:
-            return
-
-        self.latest_data = np.array(spectrum, dtype=np.float64)
-        self.latest_start = float(start_freq)
-        self.latest_end = float(end_freq)
-        self.need_redraw = True
-
-    def _draw(self):
-        if not self.need_redraw or self.latest_data is None:
-            return
-
-        data = self.latest_data
-        n = len(data)
-        freqs = np.linspace(self.latest_start, self.latest_end, n)
-
-        self.spectrum_line.set_data(freqs, data)
-        self.ax_spectrum.set_xlim(self.latest_start, self.latest_end)
-
-        data_min = np.min(data)
-        data_max = np.max(data)
-        margin = max((data_max - data_min) * 0.1, 2.0)
-        y_bottom = data_min - margin
-        y_top = data_max + margin
-        self.ax_spectrum.set_ylim(y_bottom, y_top)
-
-        self.ax_spectrum.set_title(
-            f"RTL-SDR Spectrum  ({self.latest_start:.3f} – {self.latest_end:.3f} MHz)"
-        )
-
-        self.ax_spectrum.relim()
-
-        peak_idx = np.argmax(data)
-        peak_freq = freqs[peak_idx]
-        peak_val = data[peak_idx]
-        noise_floor = np.median(data)
-        rbw_hz = (self.latest_end - self.latest_start) / n * 1e6
-
-        if rbw_hz >= 1000:
-            rbw_str = f"{rbw_hz / 1000:.2f} kHz"
-        else:
-            rbw_str = f"{rbw_hz:.1f} Hz"
-
-        info = (
-            f"Range: {self.latest_start:.3f} – {self.latest_end:.3f} MHz  |  "
-            f"Bins: {n}  |  "
-            f"RBW: {rbw_str}  |  "
-            f"Peak: {peak_val:.1f} dBFS @ {peak_freq:.4f} MHz  |  "
-            f"Noise: {noise_floor:.1f} dBFS"
-        )
-        self.info_text.set_text(info)
-        self.annotation.set_visible(False)
-        self.fig.canvas.draw_idle()
-        self.need_redraw = False
-
-    def _on_close(self, event):
-        self._running = False
-
-    def run(self):
-        self._running = True
-        timer = self.fig.canvas.new_timer(interval=200)
+    def run(self) -> None:
+        timer = self.fig.canvas.new_timer(interval=self.refresh_ms)
         timer.add_callback(self._poll)
         timer.start()
+        plt.tight_layout()
         plt.show()
 
-    def _poll(self):
-        if self.need_redraw:
-            self._draw()
+    def _poll(self) -> None:
+        frame = self.state.take_if_dirty()
+        if frame is not None:
+            self.draw(frame)
+
+    def draw(self, frame: SpectrumFrame) -> None:
+        if not frame.spectrum:
+            return
+
+        self.last_frame = frame
+        data = np.asarray(frame.spectrum, dtype=np.float64)
+        valid = np.isfinite(data) & (data > -180.0)
+        if not np.any(valid):
+            return
+
+        start_mhz = frame.start_hz / 1e6
+        end_mhz = frame.end_hz / 1e6
+        freqs = np.linspace(start_mhz, end_mhz, data.size)
+        valid_data = data[valid]
+
+        self.spectrum_line.set_data(freqs, data)
+
+        noise = float(np.median(valid_data))
+        self.noise_line.set_data([start_mhz, end_mhz], [noise, noise])
+
+        peak_idx = int(np.nanargmax(data))
+        peak_freq = float(freqs[peak_idx])
+        peak_db = float(data[peak_idx])
+        self.peak_marker.set_data([peak_freq], [peak_db])
+
+        y_bottom, y_top = self._power_axis_limits(valid_data)
+
+        self.ax.set_xlim(start_mhz, end_mhz)
+        self.ax.set_ylim(y_bottom, y_top)
+        self.ax.set_title(f"RTL-SDR Spectrum  {start_mhz:.3f}-{end_mhz:.3f} MHz")
+
+        rbw_hz = (frame.end_hz - frame.start_hz) / max(data.size - 1, 1)
+        fm_count = sum(1 for det in frame.detections if isinstance(det, dict) and det.get("type") == "fm_spec")
+        self.info_box.set_text(
+            f"Range: {start_mhz:.3f}-{end_mhz:.3f} MHz\n"
+            f"Bins: {data.size}  RBW: {format_hz(rbw_hz)}\n"
+            f"Peak: {peak_db:.1f} dBFS @ {peak_freq:.4f} MHz\n"
+            f"Noise floor: {noise:.1f} dBFS  FM labels: {fm_count}\n"
+            f"Updated: {frame.received_at:%H:%M:%S}"
+        )
+
+        self._clear_annotations()
+        self._draw_detections(frame.detections, y_bottom, y_top)
+        self._update_waterfall(data, valid, start_mhz, end_mhz, y_bottom, y_top)
+        self._deduplicate_legend()
+        self.fig.canvas.draw_idle()
+
+    def _power_axis_limits(self, valid_data: np.ndarray) -> tuple[float, float]:
+        data_min = float(np.min(valid_data))
+        data_max = float(np.max(valid_data))
+        span = max(data_max - data_min, 1.0)
+        margin = max(span * 0.18, 6.0)
+        y_bottom = np.floor((data_min - margin) / 5.0) * 5.0
+        y_top = np.ceil((data_max + margin) / 5.0) * 5.0
+        if y_top - y_bottom < 20.0:
+            center = (y_top + y_bottom) * 0.5
+            y_bottom = center - 10.0
+            y_top = center + 10.0
+        return float(y_bottom), float(y_top)
+
+    def _update_waterfall(
+        self,
+        data: np.ndarray,
+        valid: np.ndarray,
+        start_mhz: float,
+        end_mhz: float,
+        y_bottom: float,
+        y_top: float,
+    ) -> None:
+        shape = (data.size, start_mhz, end_mhz)
+        if self.waterfall_shape != shape:
+            self.waterfall_data.clear()
+            self.waterfall_shape = shape
+
+        row = data.copy()
+        if not np.all(valid):
+            fill = float(np.median(data[valid])) if np.any(valid) else y_bottom
+            row[~valid] = fill
+        self.waterfall_data.append(row)
+        if len(self.waterfall_data) > self.history_size:
+            self.waterfall_data = self.waterfall_data[-self.history_size :]
+
+        wf = np.vstack(self.waterfall_data)
+        vmin = max(float(np.percentile(wf, 5)), y_bottom)
+        vmax = min(float(np.percentile(wf, 99)), y_top)
+        if vmax <= vmin:
+            vmin = y_bottom
+            vmax = y_top
+
+        self.waterfall.set_data(wf)
+        self.waterfall.set_extent([start_mhz, end_mhz, len(self.waterfall_data), 0])
+        self.waterfall.set_clim(vmin, vmax)
+        self.ax_waterfall.set_xlim(start_mhz, end_mhz)
+        self.ax_waterfall.set_ylim(len(self.waterfall_data), 0)
+        self.ax_waterfall.set_ylabel(f"Recent sweeps ({len(self.waterfall_data)})")
+
+    def _draw_detections(self, detections: list[dict], y_bottom: float, y_top: float) -> None:
+        height = y_top - y_bottom
+        if height <= 0:
+            return
+
+        for det in detections:
+            if not isinstance(det, dict) or det.get("type") != "fm_spec":
+                continue
+
+            start_hz = det.get("start_freq")
+            end_hz = det.get("end_freq")
+            if start_hz is None or end_hz is None:
+                continue
+
+            start_mhz = float(start_hz) / 1e6
+            end_mhz = float(end_hz) / 1e6
+            if end_mhz <= start_mhz:
+                continue
+
+            rect = Rectangle(
+                (start_mhz, y_bottom),
+                end_mhz - start_mhz,
+                height,
+                fill=False,
+                edgecolor="#d62728",
+                linewidth=1.6,
+                alpha=0.95,
+                label="FM detection",
+            )
+            self.ax.add_patch(rect)
+            self.annotation_artists.append(rect)
+
+            center_mhz = float(det.get("cf", (float(start_hz) + float(end_hz)) * 0.5)) / 1e6
+            bw_khz = float(det.get("bw", float(end_hz) - float(start_hz))) / 1e3
+            snr_db = float(det.get("snr_db", 0.0))
+            confidence = float(det.get("confidence", 0.0))
+            flags = []
+            if det.get("verified"):
+                flags.append("verified")
+            if det.get("stereo"):
+                flags.append("stereo")
+            if det.get("rds"):
+                flags.append("RDS")
+            suffix = f" ({', '.join(flags)})" if flags else ""
+            label = (
+                f"FM {center_mhz:.3f} MHz{suffix}\n"
+                f"BW {bw_khz:.0f} kHz  SNR {snr_db:.1f} dB  C {confidence:.2f}"
+            )
+            text = self.ax.annotate(
+                label,
+                xy=(center_mhz, y_top - height * 0.08),
+                xytext=(0, 0),
+                textcoords="offset points",
+                ha="center",
+                va="top",
+                fontsize=8,
+                color="#d62728",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#d62728", alpha=0.8),
+            )
+            self.annotation_artists.append(text)
+
+    def _clear_annotations(self) -> None:
+        for artist in self.annotation_artists:
+            artist.remove()
+        self.annotation_artists.clear()
+
+    def _deduplicate_legend(self) -> None:
+        handles, labels = self.ax.get_legend_handles_labels()
+        unique = {}
+        for handle, label in zip(handles, labels, strict=False):
+            if label not in unique:
+                unique[label] = handle
+        self.ax.legend(unique.values(), unique.keys(), loc="lower left")
+
+    def _on_mouse_move(self, event) -> None:
+        if event.inaxes != self.ax or self.last_frame is None or event.xdata is None:
+            self.coord_box.set_text("")
+            self.fig.canvas.draw_idle()
+            return
+
+        data = np.asarray(self.last_frame.spectrum, dtype=np.float64)
+        if data.size < 2:
+            return
+
+        start_mhz = self.last_frame.start_hz / 1e6
+        end_mhz = self.last_frame.end_hz / 1e6
+        idx = int(round((event.xdata - start_mhz) / max(end_mhz - start_mhz, 1e-12) * (data.size - 1)))
+        if idx < 0 or idx >= data.size:
+            self.coord_box.set_text("")
+            self.fig.canvas.draw_idle()
+            return
+
+        freq_mhz = start_mhz + (end_mhz - start_mhz) * idx / (data.size - 1)
+        self.coord_box.set_text(f"{freq_mhz:.5f} MHz\n{data[idx]:.2f} dBFS")
+        self.fig.canvas.draw_idle()
 
 
 class DataHandler(BaseHTTPRequestHandler):
+    state: SharedState | None = None
+    path: str = "/api/service"
 
-    def do_POST(self):
-        if self.path != "/api/service":
+    def do_POST(self) -> None:
+        if self.path != self.__class__.path:
             self.send_error(404, "Not Found")
             return
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0:
             self.send_error(400, "Empty Body")
             return
 
-        body = self.rfile.read(content_length)
         try:
-            payload = json.loads(body)
-        except json.JSONDecodeError as e:
-            self.send_error(400, f"Invalid JSON: {e}")
+            payload = json.loads(self.rfile.read(content_length))
+        except json.JSONDecodeError as exc:
+            self.send_error(400, f"Invalid JSON: {exc}")
             return
 
         event = payload.get("event", "")
         data = payload.get("data", {})
 
-        if event == "ADSB_DATA_LIST":
-            self._handle_adsb(data)
-        elif event == "scan_data":
+        if event == "scan_data":
             self._handle_scan(data)
+        elif event == "ADSB_DATA_LIST":
+            self._handle_adsb(data)
         elif event == "scan_heartbeat":
             self._handle_heartbeat(data)
         elif event == "scan_events":
             self._handle_scan_events(data)
         else:
-            logger.warning("Unknown event: %s", event)
+            logger.debug("Ignoring event: %s", event)
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"status":"ok"}')
 
-    def _handle_adsb(self, data):
-        if not isinstance(data, list):
-            logger.warning("ADSB_DATA_LIST data is not a list")
-            return
-
-        logger.info("=== ADS-B Data (%d aircraft) ===", len(data))
-        for ac in data:
-            logger.info(
-                "  %s | %-8s | alt=%7.1fm | spd=%6.1fm/s | lat=%8.4f lon=%9.4f | yaw=%5.1f | msg=%d | %s",
-                ac.get("uuid", "?"),
-                ac.get("flight", "-"),
-                ac.get("alt", 0),
-                ac.get("horizontal_speed", 0),
-                ac.get("lat", 0),
-                ac.get("lng", 0),
-                ac.get("yaw", 0),
-                ac.get("seq", 0),
-                "ground" if ac.get("on_ground") else "air",
-            )
-
-    def _handle_scan(self, data):
+    def _handle_scan(self, data: dict) -> None:
         if not isinstance(data, dict):
-            logger.warning("scan_data data is not a dict")
+            logger.warning("scan_data.data is not an object")
             return
 
-        start_freq_hz = data.get("start_freq", 0)
-        end_freq_hz = data.get("end_freq", 0)
-        max_val = data.get("max_value", 0)
-        min_val = data.get("min_value", 0)
         spectrum = data.get("data", [])
-
-        if not spectrum:
-            logger.warning("scan_data contains empty spectrum")
+        if not isinstance(spectrum, list) or not spectrum:
+            logger.warning("scan_data contains no spectrum")
             return
 
-        start_freq = start_freq_hz / 1e6
-        end_freq = end_freq_hz / 1e6
+        frame = SpectrumFrame(
+            start_hz=float(data.get("start_freq", 0.0)),
+            end_hz=float(data.get("end_freq", 0.0)),
+            spectrum=spectrum,
+            detections=data.get("result", []) if isinstance(data.get("result", []), list) else [],
+            received_at=datetime.now(),
+        )
+        if self.__class__.state is not None:
+            self.__class__.state.update(frame)
 
         logger.info(
-            "=== Scan Data ===  %.3f - %.3f MHz | bins=%d | max=%.1f dBFS | min=%.1f dBFS",
-            start_freq,
-            end_freq,
-            len(spectrum),
-            max_val,
-            min_val,
+            "scan_data %.3f-%.3f MHz bins=%d result=%d",
+            frame.start_hz / 1e6,
+            frame.end_hz / 1e6,
+            len(frame.spectrum),
+            len(frame.detections),
         )
 
-        if G_PLOTTER is not None:
-            G_PLOTTER.update(start_freq, end_freq, spectrum)
+    def _handle_adsb(self, data) -> None:
+        if isinstance(data, list):
+            logger.info("ADSB_DATA_LIST aircraft=%d", len(data))
 
-    def _handle_heartbeat(self, data):
-        dev_state = data.get("dev_state", 0)
-        is_running = bool(dev_state & 4)
-        is_scanning = bool(dev_state & 2)
-        logger.debug("Heartbeat: dev_state=%d (running=%s, scanning=%s)", dev_state, is_running, is_scanning)
+    def _handle_heartbeat(self, data) -> None:
+        dev_state = data.get("dev_state", 0) if isinstance(data, dict) else 0
+        logger.debug(
+            "Heartbeat: dev_state=%d running=%s scanning=%s",
+            dev_state,
+            bool(dev_state & 4),
+            bool(dev_state & 2),
+        )
 
-    def _handle_scan_events(self, data):
-        msg = data.get("msg", "")
+    def _handle_scan_events(self, data) -> None:
+        msg = data.get("msg", "") if isinstance(data, dict) else ""
         logger.warning("Device event: %s", msg)
 
-    def log_message(self, format, *args):
-        logger.debug("%s - %s", self.client_address[0], format % args)
+    def log_message(self, fmt: str, *args) -> None:
+        logger.debug("%s - %s", self.client_address[0], fmt % args)
 
 
-G_PLOTTER = None
-host = "127.0.0.1"
-port = 23568
+def format_hz(value: float) -> str:
+    if abs(value) >= 1e6:
+        return f"{value / 1e6:.3f} MHz"
+    if abs(value) >= 1e3:
+        return f"{value / 1e3:.2f} kHz"
+    return f"{value:.1f} Hz"
 
 
-def main():
-    global G_PLOTTER
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Receive and plot RTL_SDR_Scanner spectrum data.")
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP listen host, default 127.0.0.1")
+    parser.add_argument("--port", type=int, default=23568, help="HTTP listen port, default 23568")
+    parser.add_argument("--path", default="/api/service", help="HTTP POST path, default /api/service")
+    parser.add_argument("--refresh-ms", type=int, default=200, help="Plot refresh interval, default 200")
+    parser.add_argument("--history", type=int, default=120, help="Waterfall history length in sweeps, default 120")
+    return parser.parse_args()
 
-    plotter = SpectrumPlotter()
-    G_PLOTTER = plotter
 
-    server = HTTPServer((host, port), DataHandler)
-    server.timeout = 0.5
+def main() -> int:
+    args = parse_args()
+    state = SharedState()
 
+    DataHandler.state = state
+    DataHandler.path = args.path
+    server = HTTPServer((args.host, args.port), DataHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
-    logger.info("Spectrum plot window opened. Use toolbar to zoom/pan, hover for precise reading.")
-    logger.info("Press Ctrl+C to stop")
-
+    logger.info("Listening on http://%s:%d%s", args.host, args.port, args.path)
     try:
-        plotter.run()
-    except KeyboardInterrupt:
-        logger.info("Stopping...")
+        SpectrumPlotter(state, args.refresh_ms, max(args.history, 1)).run()
     finally:
         server.shutdown()
         server.server_close()
-        logger.info("Service stopped")
+        logger.info("Stopped")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

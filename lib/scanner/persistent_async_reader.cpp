@@ -105,14 +105,54 @@ void PersistentAsyncReader::readerLoop() {
                 continue;
             }
 
-            rtlsdr_set_center_freq(dev_, req.centerFreq);
-            if (req.directSampling) {
-                rtlsdr_set_direct_sampling(dev_, req.directSampling);
-            } else {
-                rtlsdr_set_direct_sampling(dev_, 0);
+            int tuneRet = rtlsdr_set_center_freq(dev_, req.centerFreq);
+            if (tuneRet < 0) {
+                std::lock_guard<std::mutex> lock(mtx_);
+                if (req.requestId == nextRequestId_) {
+                    spdlog::error("Failed to set center freq {}: error {}", req.centerFreq, tuneRet);
+                    dataResult_         = ReadResult::DEVICE_ERROR;
+                    dataLen_            = 0;
+                    dataReady_          = true;
+                    completedRequestId_ = req.requestId;
+                    dataCv_.notify_all();
+                }
+                continue;
             }
 
-            rtlsdr_reset_buffer(dev_);
+            int dsRet = 0;
+            if (req.directSampling) {
+                dsRet = rtlsdr_set_direct_sampling(dev_, req.directSampling);
+            } else {
+                dsRet = rtlsdr_set_direct_sampling(dev_, 0);
+            }
+            if (dsRet < 0) {
+                std::lock_guard<std::mutex> lock(mtx_);
+                if (req.requestId == nextRequestId_) {
+                    spdlog::error("Failed to set direct sampling mode {}: error {}", req.directSampling, dsRet);
+                    dataResult_         = ReadResult::DEVICE_ERROR;
+                    dataLen_            = 0;
+                    dataReady_          = true;
+                    completedRequestId_ = req.requestId;
+                    dataCv_.notify_all();
+                }
+                continue;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(TUNE_SETTLE_MS));
+
+            int resetRet = rtlsdr_reset_buffer(dev_);
+            if (resetRet < 0) {
+                std::lock_guard<std::mutex> lock(mtx_);
+                if (req.requestId == nextRequestId_) {
+                    spdlog::error("Failed to reset RTL-SDR buffer: error {}", resetRet);
+                    dataResult_         = ReadResult::DEVICE_ERROR;
+                    dataLen_            = 0;
+                    dataReady_          = true;
+                    completedRequestId_ = req.requestId;
+                    dataCv_.notify_all();
+                }
+                continue;
+            }
 
             int nRead = 0;
             int ret   = rtlsdr_read_sync(dev_, internalBuf_.data(), req.expectedLen, &nRead);
