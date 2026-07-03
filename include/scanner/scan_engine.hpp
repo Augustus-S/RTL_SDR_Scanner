@@ -86,6 +86,9 @@ private:
     std::vector<FmTrack>                   fmTracks_;
     std::vector<AmTrack>                   amTracks_;
     std::unique_ptr<PersistentAsyncReader> reader_;
+
+    std::vector<double> prevSpectrum_;
+    bool                hasPrevSpectrum_{false};
 };
 
 } // namespace rtl::scanner

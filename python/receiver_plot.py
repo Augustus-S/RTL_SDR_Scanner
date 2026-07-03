@@ -20,6 +20,7 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
+from scipy.signal import savgol_filter
 
 
 logging.basicConfig(
@@ -114,9 +115,9 @@ class SpectrumPlotter:
         self.waterfall = self.ax_waterfall.imshow(
             np.full((self.history_size, 2), np.nan),
             aspect="auto",
-            interpolation="nearest",
+            interpolation="bilinear",
             origin="upper",
-            cmap="viridis",
+            cmap="jet",
         )
         self.colorbar = self.fig.colorbar(self.waterfall, cax=self.cax)
         self.colorbar.set_label("Power (dBFS)")
@@ -153,14 +154,16 @@ class SpectrumPlotter:
         freqs = np.linspace(start_mhz, end_mhz, data.size)
         valid_data = data[valid]
 
-        self.spectrum_line.set_data(freqs, data)
+        display_data = self._smooth_spectrum(data)
+
+        self.spectrum_line.set_data(freqs, display_data)
 
         noise = float(np.median(valid_data))
         self.noise_line.set_data([start_mhz, end_mhz], [noise, noise])
 
-        peak_idx = int(np.nanargmax(data))
+        peak_idx = int(np.nanargmax(display_data))
         peak_freq = float(freqs[peak_idx])
-        peak_db = float(data[peak_idx])
+        peak_db = float(display_data[peak_idx])
         self.peak_marker.set_data([peak_freq], [peak_db])
 
         y_bottom, y_top = self._power_axis_limits(valid_data)
@@ -199,6 +202,17 @@ class SpectrumPlotter:
             y_top = center + 10.0
         return float(y_bottom), float(y_top)
 
+    def _smooth_spectrum(self, data: np.ndarray) -> np.ndarray:
+        n = data.size
+        if n < 7:
+            return data
+        window = 7 if n >= 7 else min(n if n % 2 == 1 else n - 1, 7)
+        poly = 3 if window > 3 else min(window - 1, 3)
+        try:
+            return savgol_filter(data, window_length=window, polyorder=poly)
+        except ValueError:
+            return data
+
     def _update_waterfall(
         self,
         data: np.ndarray,
@@ -224,11 +238,17 @@ class SpectrumPlotter:
             self.waterfall_buffer[0, :] = row
 
         wf = self.waterfall_buffer
-        vmin = max(float(np.percentile(wf, 5)), y_bottom)
-        vmax = min(float(np.percentile(wf, 99)), y_top)
+        vmin_raw = float(np.percentile(wf, 2))
+        vmax_raw = float(np.percentile(wf, 98))
+        if vmin_raw >= -110.0 and vmax_raw <= -20.0:
+            vmin = -110.0
+            vmax = -20.0
+        else:
+            vmin = max(vmin_raw, -110.0)
+            vmax = min(vmax_raw, -20.0)
         if vmax <= vmin:
-            vmin = y_bottom
-            vmax = y_top
+            vmin = -110.0
+            vmax = -20.0
 
         bin_width = (end_mhz - start_mhz) / max(data.size - 1, 1)
         half_bin = bin_width * 0.5

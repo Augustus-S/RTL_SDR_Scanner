@@ -205,6 +205,18 @@ void ScanEngine::spliceAndPush(
     rtl::tools::suppressPeriodicSpurs(
         spliced_spectrum, static_cast<double>(sweepStartFreq), static_cast<double>(sweepEndFreq));
 
+    constexpr double EMA_ALPHA = 0.6;
+    if (hasPrevSpectrum_ && prevSpectrum_.size() == spliced_spectrum.size()) {
+        for (std::size_t i = 0; i < spliced_spectrum.size(); ++i) {
+            double p_prev = std::pow(10.0, prevSpectrum_[i] / 10.0);
+            double p_curr = std::pow(10.0, spliced_spectrum[i] / 10.0);
+            double p_avg  = EMA_ALPHA * p_prev + (1.0 - EMA_ALPHA) * p_curr;
+            spliced_spectrum[i] = 10.0 * std::log10(std::max(p_avg, 1e-30));
+        }
+    }
+    prevSpectrum_     = spliced_spectrum;
+    hasPrevSpectrum_  = true;
+
     nlohmann::json result_arr = nlohmann::json::array();
     std::sort(currentFmDetections_.begin(), currentFmDetections_.end(), [](const auto& a, const auto& b) {
         if (a.centerHz == b.centerHz) return a.confidence > b.confidence;
