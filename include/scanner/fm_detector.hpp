@@ -76,7 +76,9 @@ public:
         double                     segmentEndHz,
         const std::uint8_t*        iq,
         std::uint32_t              bytesRead,
-        double                     tunerCenterHz) const;
+        double                     tunerCenterHz,
+        int                        maxIqVerifications,
+        int*                       verificationAttempts = nullptr) const;
 
 private:
     struct IqFeatures {

@@ -1,5 +1,6 @@
 #include "scanner/persistent_async_reader.hpp"
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <cstring>
 
 namespace rtl::scanner {
@@ -30,7 +31,7 @@ void PersistentAsyncReader::shutdown() {
 }
 
 PersistentAsyncReader::ReadResult PersistentAsyncReader::read(
-    uint8_t* outBuf, uint32_t* outLen, uint32_t centerFreq, int directSampling, int timeoutMs) {
+    uint8_t* outBuf, uint32_t* outLen, uint32_t centerFreq, int directSampling, int timeoutMs, int tuneSettleMs) {
     if (!running_) return ReadResult::SHUTDOWN;
     if (!outBuf || !outLen || *outLen == 0) return ReadResult::DEVICE_ERROR;
     if (*outLen > MAX_READ_BYTES) {
@@ -46,7 +47,7 @@ PersistentAsyncReader::ReadResult PersistentAsyncReader::read(
         dataReady_ = false;
         requestId  = ++nextRequestId_;
         cmdQueue_  = {};
-        cmdQueue_.push({Command::READ, requestId, centerFreq, directSampling, deadline, *outLen});
+        cmdQueue_.push({Command::READ, requestId, centerFreq, directSampling, tuneSettleMs, deadline, *outLen});
     }
     cmdCv_.notify_one();
 
@@ -119,26 +120,24 @@ void PersistentAsyncReader::readerLoop() {
                 continue;
             }
 
-            int dsRet = 0;
-            if (req.directSampling) {
-                dsRet = rtlsdr_set_direct_sampling(dev_, req.directSampling);
-            } else {
-                dsRet = rtlsdr_set_direct_sampling(dev_, 0);
-            }
-            if (dsRet < 0) {
-                std::lock_guard<std::mutex> lock(mtx_);
-                if (req.requestId == nextRequestId_) {
-                    spdlog::error("Failed to set direct sampling mode {}: error {}", req.directSampling, dsRet);
-                    dataResult_         = ReadResult::DEVICE_ERROR;
-                    dataLen_            = 0;
-                    dataReady_          = true;
-                    completedRequestId_ = req.requestId;
-                    dataCv_.notify_all();
+            if (req.directSampling != currentDirectSampling_) {
+                int dsRet = rtlsdr_set_direct_sampling(dev_, req.directSampling);
+                if (dsRet < 0) {
+                    std::lock_guard<std::mutex> lock(mtx_);
+                    if (req.requestId == nextRequestId_) {
+                        spdlog::error("Failed to set direct sampling mode {}: error {}", req.directSampling, dsRet);
+                        dataResult_         = ReadResult::DEVICE_ERROR;
+                        dataLen_            = 0;
+                        dataReady_          = true;
+                        completedRequestId_ = req.requestId;
+                        dataCv_.notify_all();
+                    }
+                    continue;
                 }
-                continue;
+                currentDirectSampling_ = req.directSampling;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(TUNE_SETTLE_MS));
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(req.tuneSettleMs, 0)));
 
             int resetRet = rtlsdr_reset_buffer(dev_);
             if (resetRet < 0) {

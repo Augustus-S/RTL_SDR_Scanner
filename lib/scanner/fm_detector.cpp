@@ -76,54 +76,70 @@ double peakSnrDb(
 
 std::vector<double> makeHannSpectrum(const std::vector<double>& samples, std::uint32_t sampleRate, int fftSize) {
     (void)sampleRate;
+    struct FftCache {
+        int                 fftSize = 0;
+        std::vector<double> window;
+        double              windowPower = 0.0;
+        double*             in          = nullptr;
+        fftw_complex*       out         = nullptr;
+        fftw_plan           plan        = nullptr;
+
+        ~FftCache() {
+            if (plan) fftw_destroy_plan(plan);
+            fftw_free(in);
+            fftw_free(out);
+        }
+
+        bool ensure(int size) {
+            if (fftSize == size && plan && in && out) return true;
+            if (plan) fftw_destroy_plan(plan);
+            fftw_free(in);
+            fftw_free(out);
+            plan        = nullptr;
+            in          = nullptr;
+            out         = nullptr;
+            fftSize     = size;
+            windowPower = 0.0;
+            window.resize(static_cast<std::size_t>(fftSize));
+            for (int i = 0; i < fftSize; ++i) {
+                window[static_cast<std::size_t>(i)] = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (fftSize - 1)));
+                windowPower += window[static_cast<std::size_t>(i)] * window[static_cast<std::size_t>(i)];
+            }
+            in  = static_cast<double*>(fftw_malloc(sizeof(double) * fftSize));
+            out = static_cast<fftw_complex*>(fftw_malloc(sizeof(fftw_complex) * (fftSize / 2 + 1)));
+            if (!in || !out) return false;
+            plan = fftw_plan_dft_r2c_1d(fftSize, in, out, FFTW_ESTIMATE);
+            return plan != nullptr;
+        }
+    };
+
     std::vector<double> spectrum(static_cast<std::size_t>(fftSize / 2), -200.0);
     if (static_cast<int>(samples.size()) < fftSize) return spectrum;
 
+    thread_local FftCache cache;
+    if (!cache.ensure(fftSize)) return spectrum;
+
     const int           blocks = std::min(32, static_cast<int>(samples.size()) / fftSize);
-    std::vector<double> window(static_cast<std::size_t>(fftSize));
-    double              windowPower = 0.0;
-    for (int i = 0; i < fftSize; ++i) {
-        window[static_cast<std::size_t>(i)] = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (fftSize - 1)));
-        windowPower += window[static_cast<std::size_t>(i)] * window[static_cast<std::size_t>(i)];
-    }
-
-    double*       in   = static_cast<double*>(fftw_malloc(sizeof(double) * fftSize));
-    fftw_complex* out  = static_cast<fftw_complex*>(fftw_malloc(sizeof(fftw_complex) * (fftSize / 2 + 1)));
-    fftw_plan     plan = nullptr;
-    if (!in || !out) {
-        fftw_free(in);
-        fftw_free(out);
-        return spectrum;
-    }
-    plan = fftw_plan_dft_r2c_1d(fftSize, in, out, FFTW_ESTIMATE);
-    if (!plan) {
-        fftw_free(in);
-        fftw_free(out);
-        return spectrum;
-    }
-
     std::vector<double> power(static_cast<std::size_t>(fftSize / 2), 0.0);
     for (int b = 0; b < blocks; ++b) {
         for (int n = 0; n < fftSize; ++n) {
-            in[n] = samples[static_cast<std::size_t>(b * fftSize + n)] * window[static_cast<std::size_t>(n)];
+            cache.in[n] =
+                samples[static_cast<std::size_t>(b * fftSize + n)] * cache.window[static_cast<std::size_t>(n)];
         }
-        fftw_execute(plan);
+        fftw_execute(cache.plan);
         for (int k = 0; k < fftSize / 2; ++k) {
-            const double re                     = out[k][0];
-            const double im                     = out[k][1];
+            const double re                     = cache.out[k][0];
+            const double im                     = cache.out[k][1];
             power[static_cast<std::size_t>(k)] += re * re + im * im;
         }
     }
 
-    const double norm = std::max(windowPower * blocks, 1e-12);
+    const double norm = std::max(cache.windowPower * blocks, 1e-12);
     for (int k = 0; k < fftSize / 2; ++k) {
         spectrum[static_cast<std::size_t>(k)] =
             10.0 * std::log10(std::max(power[static_cast<std::size_t>(k)] / norm, 1e-20));
     }
 
-    fftw_destroy_plan(plan);
-    fftw_free(in);
-    fftw_free(out);
     return spectrum;
 }
 
@@ -275,7 +291,8 @@ std::vector<FmDetection> FMDetector::verifyCandidates(
             candidate.centerHz + config_.verifyTuningOffsetHz,
             static_cast<double>(rtl::constants::MIN_FREQ),
             static_cast<double>(rtl::constants::MAX_FREQ)));
-        auto                      result = reader.read(iq.data(), &outLen, tuneHz, 0, rtl::constants::READ_TIMEOUT_MS);
+        auto                      result =
+            reader.read(iq.data(), &outLen, tuneHz, 0, rtl::constants::READ_TIMEOUT_MS, 50);
         ++verifiedCount;
 
         if (result == PersistentAsyncReader::ReadResult::SUCCESS) {
@@ -313,12 +330,16 @@ std::vector<FmDetection> FMDetector::detectInIqSegment(
     double                     segmentEndHz,
     const std::uint8_t*        iq,
     std::uint32_t              bytesRead,
-    double                     tunerCenterHz) const {
+    double                     tunerCenterHz,
+    int                        maxIqVerifications,
+    int*                       verificationAttempts) const {
     std::vector<FmDetection> detections;
-    if (!iq || bytesRead < 4096) return detections;
+    if (verificationAttempts) *verificationAttempts = 0;
+    if (!iq || bytesRead < 4096 || maxIqVerifications <= 0) return detections;
 
     auto      candidates = findCandidates(spectrum, segmentStartHz, segmentEndHz);
-    const int limit      = std::min<int>(2, static_cast<int>(candidates.size()));
+    const int limit      = std::min<int>(maxIqVerifications, static_cast<int>(candidates.size()));
+    if (verificationAttempts) *verificationAttempts = limit;
     for (int i = 0; i < limit; ++i) {
         const auto& candidate     = candidates[static_cast<std::size_t>(i)];
         const auto  mixerOffsetHz = tunerCenterHz - candidate.centerHz;

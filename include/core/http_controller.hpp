@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 #include "httplib.h"
+#include "scanner/scan_profile.hpp"
 
 namespace rtl::core {
 
@@ -18,7 +19,8 @@ public:
         std::atomic<bool>&          adsbEnabled,
         std::atomic<bool>&          scanEnabled,
         std::atomic<std::uint32_t>& startFreq,
-        std::atomic<std::uint32_t>& endFreq);
+        std::atomic<std::uint32_t>& endFreq,
+        std::atomic<rtl::scanner::ScanProfile>& scanProfile);
     ~HttpController();
 
     HttpController(const HttpController&)            = delete;
@@ -40,6 +42,7 @@ private:
     std::atomic<bool>&          scanEnabled_;
     std::atomic<std::uint32_t>& startFreq_;
     std::atomic<std::uint32_t>& endFreq_;
+    std::atomic<rtl::scanner::ScanProfile>& scanProfile_;
     std::function<void()>       adsbStopCallback_;
     std::function<void()>       scanStopCallback_;
 };

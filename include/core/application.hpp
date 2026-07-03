@@ -9,6 +9,7 @@
 #include "core/http_controller.hpp"
 #include "scanner/rtl_sdr_device.hpp"
 #include "scanner/scan_engine.hpp"
+#include "scanner/scan_profile.hpp"
 #include "tools/pusher.hpp"
 
 namespace rtl::core {
@@ -18,6 +19,7 @@ struct AppConfig {
     bool   scanEnabled = false;
     double startFreqHz = 10e6;
     double endFreqHz   = 100e6;
+    rtl::scanner::ScanProfile scanProfile = rtl::scanner::ScanProfile::BALANCED;
 };
 
 class Application {
@@ -47,6 +49,7 @@ private:
     std::atomic<bool>          scanEnabled_{false};
     std::atomic<std::uint32_t> startFreq_{0};
     std::atomic<std::uint32_t> endFreq_{0};
+    std::atomic<rtl::scanner::ScanProfile> scanProfile_{rtl::scanner::ScanProfile::BALANCED};
     std::atomic<int>           maxGain_{0};
 
     std::unique_ptr<rtl::scanner::RtlSdrDevice> device_;

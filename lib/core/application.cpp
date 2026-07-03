@@ -25,6 +25,7 @@ Application::Application(const AppConfig& config)
     scanEnabled_.store(config.scanEnabled);
     startFreq_.store(static_cast<std::uint32_t>(config.startFreqHz));
     endFreq_.store(static_cast<std::uint32_t>(config.endFreqHz));
+    scanProfile_.store(config.scanProfile);
 }
 
 Application::~Application() {
@@ -118,6 +119,7 @@ void Application::runRadioLoop() {
         }
 
         scanEngine_->setFreqRange(startFreq_.load(), endFreq_.load());
+        scanEngine_->setScanProfile(scanProfile_.load());
         scanEngine_->start();
         auto sweepResult = scanEngine_->doOneSweep([this] {
             return running_.load() && scanEnabled_.load();
@@ -148,14 +150,19 @@ int Application::run() {
     spdlog::info("ADS-B: {}", adsbEnabled_.load() ? "enabled" : "disabled");
     spdlog::info("Scan: {}", scanEnabled_.load() ? "enabled" : "disabled");
     if (scanEnabled_.load()) {
-        spdlog::info("Scan range: {:.1f} - {:.1f} MHz", startFreq_.load() / 1e6, endFreq_.load() / 1e6);
+        spdlog::info(
+            "Scan range: {:.1f} - {:.1f} MHz, profile={}",
+            startFreq_.load() / 1e6,
+            endFreq_.load() / 1e6,
+            rtl::scanner::scanProfileName(scanProfile_.load()));
     }
 
     pusher_     = std::make_unique<rtl::tools::Pusher>(rtl::constants::DATA_URL);
     scanEngine_ = std::make_unique<rtl::scanner::ScanEngine>(device_->getRawDev(), *pusher_);
     adsbEngine_ = std::make_unique<rtl::sda_b::ADSBEngine>(device_->getRawDev(), *pusher_, maxGain_.load());
 
-    httpController_ = std::make_unique<HttpController>(running_, adsbEnabled_, scanEnabled_, startFreq_, endFreq_);
+    httpController_ =
+        std::make_unique<HttpController>(running_, adsbEnabled_, scanEnabled_, startFreq_, endFreq_, scanProfile_);
     httpController_->setAdsbStopCallback([this] {
         if (adsbEngine_) adsbEngine_->requestStop();
     });

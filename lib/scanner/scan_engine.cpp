@@ -97,24 +97,37 @@ std::pair<std::uint32_t, std::uint32_t> ScanEngine::getFreqRange() const {
     return {startFreq_.load(), endFreq_.load()};
 }
 
+void ScanEngine::setScanProfile(ScanProfile profile) {
+    scanProfile_.store(profile);
+}
+
+ScanProfile ScanEngine::getScanProfile() const {
+    return scanProfile_.load();
+}
+
 ScanEngine::SweepResult ScanEngine::doOneSweep(const std::function<bool()>& shouldContinue) {
     if (!running_ || !reader_) return SweepResult::STOPPED;
 
     std::uint32_t sweep_start_freq = startFreq_.load();
     std::uint32_t sweep_end_freq   = endFreq_.load();
+    const auto    profileConfig    = configForProfile(scanProfile_.load());
 
     auto                     sweep_start = std::chrono::steady_clock::now();
     std::vector<SegmentData> segments;
     currentFmDetections_.clear();
     currentAmDetections_.clear();
+    currentFmIqBudget_ = profileConfig.maxFmIqVerifications;
+    currentAmIqBudget_ = profileConfig.maxAmIqVerifications;
+    int hopCount = 0;
 
     for (std::uint32_t cur_freq = sweep_start_freq;
          cur_freq <= sweep_end_freq && running_ && (!shouldContinue || shouldContinue());
-         cur_freq += rtl::constants::STEP_FREQ) {
+         cur_freq += profileConfig.stepHz) {
         int need_ds = (cur_freq < rtl::constants::LOW_FREQ_THRESHOLD) ? 2 : 0;
-        if (!processOneHop(cur_freq, need_ds, segments)) {
+        if (!processOneHop(cur_freq, need_ds, profileConfig, segments)) {
             return running_ ? SweepResult::DEVICE_ERROR : SweepResult::STOPPED;
         }
+        ++hopCount;
     }
 
     if (!running_ || (shouldContinue && !shouldContinue())) return SweepResult::STOPPED;
@@ -124,16 +137,34 @@ ScanEngine::SweepResult ScanEngine::doOneSweep(const std::function<bool()>& shou
 
         auto sweep_end     = std::chrono::steady_clock::now();
         auto sweep_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(sweep_end - sweep_start);
-        spdlog::info("Sweep complete, took {} ms", sweep_elapsed.count());
+        const auto elapsedMs = sweep_elapsed.count();
+        const auto avgHopMs  = hopCount > 0 ? static_cast<double>(elapsedMs) / static_cast<double>(hopCount) : 0.0;
+        spdlog::info(
+            "Sweep complete: profile={}, hops={}, took={} ms, avg_hop={:.1f} ms, fm={}, am={}",
+            profileConfig.name,
+            hopCount,
+            elapsedMs,
+            avgHopMs,
+            currentFmDetections_.size(),
+            currentAmDetections_.size());
     }
 
     return SweepResult::COMPLETED;
 }
 
-bool ScanEngine::processOneHop(std::uint32_t centerFreq, int directSampling, std::vector<SegmentData>& segments) {
+bool ScanEngine::processOneHop(
+    std::uint32_t                  centerFreq,
+    int                            directSampling,
+    const ScanProfileConfig&       profileConfig,
+    std::vector<SegmentData>&      segments) {
     std::uint32_t n_read = 4 * rtl::constants::FFT_SIZE * 2;
-    auto          scan_result =
-        reader_->read(bufferU8_.data(), &n_read, centerFreq, directSampling, rtl::constants::READ_TIMEOUT_MS);
+    auto          scan_result = reader_->read(
+        bufferU8_.data(),
+        &n_read,
+        centerFreq,
+        directSampling,
+        rtl::constants::READ_TIMEOUT_MS,
+        profileConfig.tuneSettleMs);
 
     if (scan_result != PersistentAsyncReader::ReadResult::SUCCESS) {
         if (scan_result == PersistentAsyncReader::ReadResult::DEVICE_ERROR) {
@@ -168,25 +199,37 @@ bool ScanEngine::processOneHop(std::uint32_t centerFreq, int directSampling, std
         rssi = rtl::tools::calculateRssi(fft_power_sum, groups_num);
     }
 
-    spdlog::info("Scan Freq: {} MHz, RSSI: {} dBFS", centerFreq / 1e6, rssi);
+    spdlog::debug("Scan Freq: {} MHz, RSSI: {} dBFS", centerFreq / 1e6, rssi);
     std::vector<double> spectrum_db = rtl::tools::spectrumToDb(fft_power_sum, groups_num);
     rtl::tools::suppressDcSpike(spectrum_db);
-    auto detections = fmDetector_.detectInIqSegment(
-        spectrum_db,
-        static_cast<double>(centerFreq) - static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
-        static_cast<double>(centerFreq) + static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
-        bufferU8_.data(),
-        n_read,
-        static_cast<double>(centerFreq));
-    currentFmDetections_.insert(currentFmDetections_.end(), detections.begin(), detections.end());
-    auto amDetections = amDetector_.detectInIqSegment(
-        spectrum_db,
-        static_cast<double>(centerFreq) - static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
-        static_cast<double>(centerFreq) + static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
-        bufferU8_.data(),
-        n_read,
-        static_cast<double>(centerFreq));
-    currentAmDetections_.insert(currentAmDetections_.end(), amDetections.begin(), amDetections.end());
+    if (currentFmIqBudget_ > 0) {
+        int  attempts   = 0;
+        auto detections = fmDetector_.detectInIqSegment(
+            spectrum_db,
+            static_cast<double>(centerFreq) - static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+            static_cast<double>(centerFreq) + static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+            bufferU8_.data(),
+            n_read,
+            static_cast<double>(centerFreq),
+            currentFmIqBudget_,
+            &attempts);
+        currentFmIqBudget_ -= std::min(currentFmIqBudget_, attempts);
+        currentFmDetections_.insert(currentFmDetections_.end(), detections.begin(), detections.end());
+    }
+    if (currentAmIqBudget_ > 0) {
+        int  attempts     = 0;
+        auto amDetections = amDetector_.detectInIqSegment(
+            spectrum_db,
+            static_cast<double>(centerFreq) - static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+            static_cast<double>(centerFreq) + static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+            bufferU8_.data(),
+            n_read,
+            static_cast<double>(centerFreq),
+            currentAmIqBudget_,
+            &attempts);
+        currentAmIqBudget_ -= std::min(currentAmIqBudget_, attempts);
+        currentAmDetections_.insert(currentAmDetections_.end(), amDetections.begin(), amDetections.end());
+    }
     segments.push_back({std::move(spectrum_db), static_cast<double>(centerFreq)});
     return true;
 }

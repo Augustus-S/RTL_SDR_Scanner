@@ -14,12 +14,14 @@ HttpController::HttpController(
     std::atomic<bool>&          adsbEnabled,
     std::atomic<bool>&          scanEnabled,
     std::atomic<std::uint32_t>& startFreq,
-    std::atomic<std::uint32_t>& endFreq)
+    std::atomic<std::uint32_t>& endFreq,
+    std::atomic<rtl::scanner::ScanProfile>& scanProfile)
     : running_(running)
     , adsbEnabled_(adsbEnabled)
     , scanEnabled_(scanEnabled)
     , startFreq_(startFreq)
-    , endFreq_(endFreq) {}
+    , endFreq_(endFreq)
+    , scanProfile_(scanProfile) {}
 
 HttpController::~HttpController() {
     stop();
@@ -92,6 +94,15 @@ void HttpController::registerRoutes() {
             auto   obj = nlohmann::json::parse(req.body);
             double sf  = obj.contains("start_freq") ? obj["start_freq"].get<double>() : startFreq_.load();
             double ef  = obj.contains("end_freq") ? obj["end_freq"].get<double>() : endFreq_.load();
+            auto   profile = scanProfile_.load();
+            if (obj.contains("scan_profile")) {
+                const auto value = obj["scan_profile"].get<std::string>();
+                if (!rtl::scanner::parseScanProfile(value, profile)) {
+                    res.status = 400;
+                    res.set_content(R"({"status":"error","msg":"Invalid scan_profile"})", "application/json");
+                    return;
+                }
+            }
 
             if (!std::isfinite(sf) || !std::isfinite(ef)) {
                 res.status = 400;
@@ -117,12 +128,18 @@ void HttpController::registerRoutes() {
 
             startFreq_.store(static_cast<std::uint32_t>(sf));
             endFreq_.store(static_cast<std::uint32_t>(ef));
+            scanProfile_.store(profile);
 
             nlohmann::json res_obj;
-            res_obj["status"] = "ok";
+            res_obj["status"]       = "ok";
+            res_obj["scan_profile"] = rtl::scanner::scanProfileName(profile);
             res.set_content(res_obj.dump(4), "application/json");
 
-            spdlog::info("scan_param updated: {} - {} MHz", sf / 1e6, ef / 1e6);
+            spdlog::info(
+                "scan_param updated: {} - {} MHz, profile={}",
+                sf / 1e6,
+                ef / 1e6,
+                rtl::scanner::scanProfileName(profile));
         } catch (const std::exception& e) {
             spdlog::error("scan_param handler error: {}", e.what());
             nlohmann::json res_obj;
@@ -139,6 +156,7 @@ void HttpController::registerRoutes() {
         status["scan_enabled"] = scanEnabled_.load();
         status["start_freq"]   = startFreq_.load();
         status["end_freq"]     = endFreq_.load();
+        status["scan_profile"] = rtl::scanner::scanProfileName(scanProfile_.load());
         res.set_content(status.dump(2), "application/json");
     });
 }

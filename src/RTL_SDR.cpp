@@ -3,6 +3,7 @@
 #include <cmath>
 #include "core/application.hpp"
 #include "constants.hpp"
+#include "scanner/scan_profile.hpp"
 #include "tools/tools.hpp"
 
 namespace {
@@ -20,6 +21,7 @@ rtl::core::AppConfig parseArgs(int argc, char* argv[]) {
                       << "  --mode <1|2|3>        1=ADS-B only, 2=Scan only, 3=Both\n"
                       << "  --start-freq <MHz>    Scan start frequency (10-1070 MHz)\n"
                       << "  --end-freq <MHz>      Scan end frequency (10-1070 MHz)\n"
+                      << "  --scan-profile <name> Scan speed profile: fast|balanced|accurate (default: balanced)\n"
                       << "  --adsb                Enable ADS-B decoding\n"
                       << "  --scan                Enable frequency scanning\n"
                       << "  --help, -h            Show this help message\n\n"
@@ -42,6 +44,15 @@ rtl::core::AppConfig parseArgs(int argc, char* argv[]) {
             config.startFreqHz = std::atof(argv[++i]) * 1e6;
         } else if (arg == "--end-freq" && i + 1 < argc) {
             config.endFreqHz = std::atof(argv[++i]) * 1e6;
+        } else if (arg == "--scan-profile" && i + 1 < argc) {
+            rtl::scanner::ScanProfile profile;
+            std::string               value = argv[++i];
+            if (!rtl::scanner::parseScanProfile(value, profile)) {
+                std::cerr << "Error: Invalid scan profile '" << value << "'. Expected "
+                          << rtl::scanner::scanProfileChoices() << "\n";
+                exit(1);
+            }
+            config.scanProfile = profile;
         } else if (arg == "--adsb") {
             config.adsbEnabled = true;
         } else if (arg == "--scan") {
@@ -112,6 +123,17 @@ rtl::core::AppConfig interactiveMenu() {
 
         config.startFreqHz = startMhz * 1e6;
         config.endFreqHz   = endMhz * 1e6;
+
+        std::cout << "Select scan profile: 1=Fast, 2=Balanced, 3=Accurate [2]: ";
+        int profileChoice = 2;
+        std::cin >> profileChoice;
+        if (profileChoice == 1) {
+            config.scanProfile = rtl::scanner::ScanProfile::FAST;
+        } else if (profileChoice == 3) {
+            config.scanProfile = rtl::scanner::ScanProfile::ACCURATE;
+        } else {
+            config.scanProfile = rtl::scanner::ScanProfile::BALANCED;
+        }
     }
 
     return config;
@@ -141,6 +163,10 @@ bool validateConfig(const rtl::core::AppConfig& config) {
         }
         if ((config.endFreqHz - config.startFreqHz) > rtl::constants::MAX_BANDWIDTH) {
             std::cerr << "Error: Bandwidth exceeds 100 MHz limit\n";
+            return false;
+        }
+        if (rtl::scanner::scanProfileName(config.scanProfile) == nullptr) {
+            std::cerr << "Error: Invalid scan profile\n";
             return false;
         }
     }

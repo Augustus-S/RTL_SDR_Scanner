@@ -57,7 +57,13 @@ public:
      * @note The request length must not exceed MAX_READ_BYTES.
      */
     ReadResult
-        read(std::uint8_t* outBuf, std::uint32_t* outLen, std::uint32_t centerFreq, int directSampling, int timeoutMs);
+        read(
+            std::uint8_t* outBuf,
+            std::uint32_t* outLen,
+            std::uint32_t centerFreq,
+            int directSampling,
+            int timeoutMs,
+            int tuneSettleMs);
 
     /**
      * @brief Stop the worker thread and discard pending commands.
@@ -75,6 +81,7 @@ private:
         std::uint64_t                         requestId      = 0;
         std::uint32_t                         centerFreq     = 0;
         int                                   directSampling = 0;
+        int                                   tuneSettleMs   = 50;
         std::chrono::steady_clock::time_point deadline;
         std::uint32_t                         expectedLen = 0;
     };
@@ -98,9 +105,9 @@ private:
     std::uint64_t             completedRequestId_ = 0;
 
     std::atomic<bool> running_{false};
+    int               currentDirectSampling_ = -1;
 
     static constexpr int         STABILIZE_MS   = 20;
-    static constexpr int         TUNE_SETTLE_MS = 50;
     static constexpr std::size_t MAX_READ_BYTES = 2 * 1024 * 1024;
 };
 

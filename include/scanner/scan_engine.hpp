@@ -11,6 +11,7 @@
 #include "scanner/am_detector.hpp"
 #include "scanner/fm_detector.hpp"
 #include "scanner/persistent_async_reader.hpp"
+#include "scanner/scan_profile.hpp"
 #include "scanner/types.hpp"
 #include "tools/fft_engine.hpp"
 #include "tools/pusher.hpp"
@@ -35,6 +36,8 @@ public:
 
     void                                    setFreqRange(std::uint32_t startHz, std::uint32_t endHz);
     std::pair<std::uint32_t, std::uint32_t> getFreqRange() const;
+    void                                    setScanProfile(ScanProfile profile);
+    ScanProfile                             getScanProfile() const;
 
     enum class SweepResult {
         COMPLETED,
@@ -59,7 +62,11 @@ private:
         bool        visible = false;
     };
 
-    bool processOneHop(std::uint32_t centerFreq, int directSampling, std::vector<SegmentData>& segments);
+    bool processOneHop(
+        std::uint32_t                  centerFreq,
+        int                            directSampling,
+        const ScanProfileConfig&       profileConfig,
+        std::vector<SegmentData>&      segments);
     void spliceAndPush(
         const std::vector<SegmentData>& segments,
         std::uint32_t                   sweepStartFreq,
@@ -77,12 +84,15 @@ private:
     std::atomic<bool>          running_{false};
     std::atomic<std::uint32_t> startFreq_{0};
     std::atomic<std::uint32_t> endFreq_{0};
+    std::atomic<ScanProfile>   scanProfile_{ScanProfile::BALANCED};
 
     std::vector<std::uint8_t>              bufferU8_;
     std::vector<std::complex<short>>       bufferIQ_;
     std::vector<short>                     bufferQ_;
     std::vector<FmDetection>               currentFmDetections_;
     std::vector<AmDetection>               currentAmDetections_;
+    int                                    currentFmIqBudget_{0};
+    int                                    currentAmIqBudget_{0};
     std::vector<FmTrack>                   fmTracks_;
     std::vector<AmTrack>                   amTracks_;
     std::unique_ptr<PersistentAsyncReader> reader_;
