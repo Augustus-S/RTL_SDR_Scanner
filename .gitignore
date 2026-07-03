@@ -258,6 +258,86 @@ DocProject/Help/*.hhc
 DocProject/Help/*.hhk
 DocProject/Help/*.hhp
 DocProject/Help/Html2
+
+### RTL_SDR_Scanner local ignore rules
+# IDE / editor metadata
+.idea/
+.vscode/
+.vs/
+.fleet/
+.code/
+*.iml
+*.iws
+*.ipr
+.project
+.classpath
+.settings/
+.cproject
+.pydevproject
+
+# OS / file manager metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# CMake / native build outputs
+/build/
+/cmake-build-*/
+/out/
+/dist/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+Makefile
+*.ninja
+.ninja_*
+
+# Compiled binaries and debug symbols
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.pdb
+*.dSYM/
+
+# Python cache, virtualenvs, tooling caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+.pyre/
+.hypothesis/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+ENV/
+
+# Matplotlib and local runtime files
+.mplconfig/
+**/.mplconfig/
+.cache/
+logs/
+*.log
+
+# Generated SDR/simulation data
+simulation/**/*.iq
+*.wav
+*.raw
 DocProject/Help/html
 
 # Click-Once directory
