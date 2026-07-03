@@ -65,17 +65,18 @@ class SpectrumPlotter:
         self.history_size = history_size
         self.annotation_artists = []
         self.last_frame: SpectrumFrame | None = None
-        self.waterfall_data: list[np.ndarray] = []
+        self.waterfall_buffer: np.ndarray | None = None
         self.waterfall_shape: tuple[int, float, float] | None = None
 
-        self.fig, (self.ax, self.ax_waterfall) = plt.subplots(
-            2,
-            1,
-            figsize=(15, 9),
-            gridspec_kw={"height_ratios": [3, 2]},
-            sharex=True,
-        )
+        self.fig = plt.figure(figsize=(15, 9))
         self.fig.canvas.manager.set_window_title("RTL-SDR Spectrum Scanner")
+
+        gs = self.fig.add_gridspec(2, 2, width_ratios=[24, 1], height_ratios=[3, 2])
+        self.ax = self.fig.add_subplot(gs[0, 0])
+        self.ax_waterfall = self.fig.add_subplot(gs[1, 0], sharex=self.ax)
+        self.cax = self.fig.add_subplot(gs[1, 1])
+        self._ax_padding = self.fig.add_subplot(gs[0, 1])
+        self._ax_padding.set_visible(False)
 
         (self.spectrum_line,) = self.ax.plot([], [], color="#1f77b4", linewidth=0.8, label="Spectrum")
         (self.noise_line,) = self.ax.plot([], [], color="#6c757d", linestyle="--", linewidth=1.0, label="Noise floor")
@@ -111,17 +112,18 @@ class SpectrumPlotter:
         self.ax.legend(loc="lower left")
 
         self.waterfall = self.ax_waterfall.imshow(
-            np.zeros((1, 1)),
+            np.full((self.history_size, 2), np.nan),
             aspect="auto",
             interpolation="nearest",
             origin="upper",
             cmap="viridis",
         )
-        self.colorbar = self.fig.colorbar(self.waterfall, ax=self.ax_waterfall, pad=0.01)
+        self.colorbar = self.fig.colorbar(self.waterfall, cax=self.cax)
         self.colorbar.set_label("Power (dBFS)")
         self.ax_waterfall.set_title("Waterfall / Time-Frequency")
         self.ax_waterfall.set_xlabel("Frequency (MHz)")
-        self.ax_waterfall.set_ylabel("Recent sweeps")
+        self.ax_waterfall.set_ylabel(f"Recent sweeps ({self.history_size})")
+        self.ax_waterfall.set_ylim(self.history_size, 0)
         self.fig.canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
 
     def run(self) -> None:
@@ -205,32 +207,36 @@ class SpectrumPlotter:
         y_bottom: float,
         y_top: float,
     ) -> None:
-        shape = (data.size, start_mhz, end_mhz)
-        if self.waterfall_shape != shape:
-            self.waterfall_data.clear()
-            self.waterfall_shape = shape
+        new_shape_key = (data.size, start_mhz, end_mhz)
 
         row = data.copy()
         if not np.all(valid):
             fill = float(np.median(data[valid])) if np.any(valid) else y_bottom
             row[~valid] = fill
-        self.waterfall_data.append(row)
-        if len(self.waterfall_data) > self.history_size:
-            self.waterfall_data = self.waterfall_data[-self.history_size :]
 
-        wf = np.vstack(self.waterfall_data)
+        if self.waterfall_shape != new_shape_key or self.waterfall_buffer is None:
+            self.waterfall_shape = new_shape_key
+            self.waterfall_buffer = np.full((self.history_size, data.size), y_bottom)
+            self.waterfall_buffer[0, :] = row
+        else:
+            self.waterfall_buffer[1:, :] = self.waterfall_buffer[:-1, :]
+            self.waterfall_buffer[0, :] = row
+
+        wf = self.waterfall_buffer
         vmin = max(float(np.percentile(wf, 5)), y_bottom)
         vmax = min(float(np.percentile(wf, 99)), y_top)
         if vmax <= vmin:
             vmin = y_bottom
             vmax = y_top
 
+        bin_width = (end_mhz - start_mhz) / max(data.size - 1, 1)
+        half_bin = bin_width * 0.5
         self.waterfall.set_data(wf)
-        self.waterfall.set_extent([start_mhz, end_mhz, len(self.waterfall_data), 0])
+        self.waterfall.set_extent([start_mhz - half_bin, end_mhz + half_bin, self.history_size, 0])
         self.waterfall.set_clim(vmin, vmax)
         self.ax_waterfall.set_xlim(start_mhz, end_mhz)
-        self.ax_waterfall.set_ylim(len(self.waterfall_data), 0)
-        self.ax_waterfall.set_ylabel(f"Recent sweeps ({len(self.waterfall_data)})")
+        self.ax_waterfall.set_ylim(self.history_size, 0)
+        self.ax_waterfall.set_ylabel(f"Recent sweeps ({self.history_size})")
 
     def _draw_detections(self, detections: list[dict], y_bottom: float, y_top: float) -> None:
         height = y_top - y_bottom
@@ -431,7 +437,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=23568, help="HTTP listen port, default 23568")
     parser.add_argument("--path", default="/api/service", help="HTTP POST path, default /api/service")
     parser.add_argument("--refresh-ms", type=int, default=200, help="Plot refresh interval, default 200")
-    parser.add_argument("--history", type=int, default=120, help="Waterfall history length in sweeps, default 120")
+    parser.add_argument("--history", type=int, default=60, help="Waterfall history length in sweeps, default 60")
     return parser.parse_args()
 
 
