@@ -6,6 +6,7 @@
 | --- | --- |
 | `fm/` | WBFM 立体声广播调制、IQ 保存、非相干解调和立体声恢复 |
 | `am/` | 常规 AM 调制、IQ 保存、包络解调和音频恢复 |
+| `ADS-B/` | ADS-B / Mode-S 1090ES PPM 调制、IQ 保存、前导码检测和消息恢复 |
 
 运行示例：
 
@@ -23,6 +24,8 @@ pixi run sim-fm-mod
 pixi run sim-fm-demod
 pixi run sim-am-mod
 pixi run sim-am-demod
+pixi run sim-ADS-B-mod
+pixi run sim-ADS-B-demod
 ```
 
 每个子目录都有独立的 `figures/` 和对应的原理说明文档。

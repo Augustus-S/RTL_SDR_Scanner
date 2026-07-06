@@ -16,6 +16,9 @@ sim-fm-mod = "python simulation/fm/fm_modulation.py"
 sim-fm-demod = "python simulation/fm/fm_demodulation.py"
 sim-am-mod = "python simulation/am/am_modulation.py"
 sim-am-demod = "python simulation/am/am_demodulation.py"
+sim-ADS-B-mod = "python simulation/ADS-B/ADS-B_modulation.py"
+sim-ADS-B-demod = "python simulation/ADS-B/ADS-B_demodulation.py"
+sim-ADS-B = "python simulation/ADS-B/ADS-B_modulation.py && python simulation/ADS-B/ADS-B_demodulation.py"
 
 [dependencies]
 python = "3.14.*"

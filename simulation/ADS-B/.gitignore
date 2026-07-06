@@ -1,0 +1,5 @@
+__pycache__/
+.mplconfig/
+*.iq
+!figures/
+!figures/*.png
