@@ -16,4 +16,13 @@ python3 simulation/am/am_modulation.py
 python3 simulation/am/am_demodulation.py
 ```
 
+使用 Pixi 环境时：
+
+```bash
+pixi run sim-fm-mod
+pixi run sim-fm-demod
+pixi run sim-am-mod
+pixi run sim-am-demod
+```
+
 每个子目录都有独立的 `figures/` 和对应的原理说明文档。

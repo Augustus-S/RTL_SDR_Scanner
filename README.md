@@ -73,6 +73,19 @@ The generated `.iq` files are raw unsigned 8-bit interleaved IQ samples. Only ru
 
 ## Build
 
+With Pixi:
+
+```bash
+pixi install
+pixi run configure
+pixi run build
+pixi run test
+```
+
+Pixi manages the Python helper environment and the C++ build tools/libraries declared in `pixi.toml`. Hardware access, RTL-SDR kernel driver blacklisting, and device ownership rules still need the system-level setup described above.
+
+Without Pixi:
+
 ```bash
 cmake -S . -B build
 cmake --build build
@@ -125,6 +138,13 @@ Python helper receivers are available:
 ```bash
 python3 python/receiver_raw.py
 python3 python/receiver_plot.py
+```
+
+With Pixi:
+
+```bash
+pixi run receiver-raw
+pixi run receiver-plot
 ```
 
 ## HTTP Control API

@@ -1,2 +1,4 @@
 __pycache__/
 .mplconfig/
+*.iq
+figures/*.png

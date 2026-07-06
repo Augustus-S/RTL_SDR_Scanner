@@ -639,3 +639,15 @@ fabric.properties
 
 # Android studio 3.1+ serialized cache file
 .idea/caches/build_file_checksums.ser
+# Pixi local environment
+.pixi/
+
+# Project generated data
+*.iq
+*.npy
+*.npz
+*.csv
+fm_spectrum.png
+fm_scan.csv
+simulation/**/*.iq
+simulation/**/figures/*.png
