@@ -82,7 +82,7 @@ pixi run build
 pixi run test
 ```
 
-Pixi manages the Python helper environment and the C++ build tools/libraries declared in `pixi.toml`. Hardware access, RTL-SDR kernel driver blacklisting, and device ownership rules still need the system-level setup described above.
+Pixi manages the Python helper environment and the C++ build tools/libraries declared in `pixi.toml`. The RTL-SDR driver and `librtlsdr` development files still come from the system packages described above, because they are also tied to USB device access, kernel driver blacklisting, and local hardware ownership rules.
 
 Without Pixi:
 
