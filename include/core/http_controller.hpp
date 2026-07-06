@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -12,15 +13,29 @@
 
 namespace rtl::core {
 
+/**
+ * @brief Runtime scan configuration shared by the HTTP controller and radio loop.
+ *
+ * Frequencies and sample rates are expressed in Hz. Callers should update and
+ * read this structure while holding the associated mutex so a scan uses one
+ * consistent configuration snapshot.
+ */
+struct ScanRuntimeConfig {
+    std::uint32_t startFreqHz      = 0;
+    std::uint32_t endFreqHz        = 0;
+    rtl::scanner::ScanProfile profile = rtl::scanner::ScanProfile::BALANCED;
+    std::uint32_t sampleRateHz     = 0;
+    rtl::scanner::ResetPolicy resetPolicy = rtl::scanner::ResetPolicy::ADAPTIVE;
+};
+
 class HttpController {
 public:
     HttpController(
         std::atomic<bool>&          running,
         std::atomic<bool>&          adsbEnabled,
         std::atomic<bool>&          scanEnabled,
-        std::atomic<std::uint32_t>& startFreq,
-        std::atomic<std::uint32_t>& endFreq,
-        std::atomic<rtl::scanner::ScanProfile>& scanProfile);
+        std::mutex&                 scanConfigMutex,
+        ScanRuntimeConfig&          scanConfig);
     ~HttpController();
 
     HttpController(const HttpController&)            = delete;
@@ -40,9 +55,8 @@ private:
     std::atomic<bool>&          running_;
     std::atomic<bool>&          adsbEnabled_;
     std::atomic<bool>&          scanEnabled_;
-    std::atomic<std::uint32_t>& startFreq_;
-    std::atomic<std::uint32_t>& endFreq_;
-    std::atomic<rtl::scanner::ScanProfile>& scanProfile_;
+    std::mutex&                 scanConfigMutex_;
+    ScanRuntimeConfig&          scanConfig_;
     std::function<void()>       adsbStopCallback_;
     std::function<void()>       scanStopCallback_;
 };

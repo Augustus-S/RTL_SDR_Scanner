@@ -4,6 +4,11 @@
 #include <vector>
 #include <cstring>
 
+/**
+ * @file rtl_sdr_device.cpp
+ * @brief Small RAII wrapper around librtlsdr device setup and teardown.
+ */
+
 namespace rtl::scanner {
 
 int RtlSdrDevice::getDeviceCount() {
@@ -66,6 +71,9 @@ void RtlSdrDevice::setSampleRate(uint32_t rate) {
 void RtlSdrDevice::setCenterFreq(uint32_t freq) {
     if (!dev_) return;
 
+    // Direct-sampling mode is required for the low-frequency range. Switch it
+    // before tuning so librtlsdr evaluates the requested frequency in the right
+    // receive path.
     int needDs = (freq < rtl::constants::LOW_FREQ_THRESHOLD) ? 2 : 0;
     if (needDs != currentDirectSampling_) {
         int ret = rtlsdr_set_direct_sampling(dev_, needDs);
@@ -113,6 +121,8 @@ void RtlSdrDevice::setGain(int gain) {
 void RtlSdrDevice::setMaxGain() {
     if (!dev_) return;
 
+    // Scanner and ADS-B detection are signal-presence oriented, so startup uses
+    // the maximum supported manual gain and lets callers override if needed.
     auto gains = getTunerGains();
     if (gains.empty()) {
         spdlog::error("Failed to get tuner gains");
@@ -171,6 +181,8 @@ void RtlSdrDevice::resetBuffer() {
 void RtlSdrDevice::stabilize(int dummyReads, int bufSize) {
     if (!dev_) return;
 
+    // Discard early samples after opening/configuring the dongle; the first
+    // buffers often contain stale or settling data from the tuner/USB path.
     resetBuffer();
     std::vector<uint8_t> dummyBuf(bufSize);
     int                  dummyLen = 0;

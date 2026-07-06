@@ -4,6 +4,11 @@
 #include <cmath>
 #include <fftw3.h>
 
+/**
+ * @file am_detector.cpp
+ * @brief Two-stage AM detector: spectrum candidates followed by IQ verification.
+ */
+
 namespace rtl::scanner {
 
 namespace {
@@ -125,6 +130,8 @@ std::vector<AmCandidate>
     const double binHz = (sweepEndHz - sweepStartHz) / static_cast<double>(n - 1);
     if (binHz <= 0.0) return candidates;
 
+    // First pass operates only on the stitched/hop spectrum. Smoothing and
+    // local-noise guards keep narrow FFT-bin noise from becoming AM candidates.
     std::vector<double> smoothed(spectrum);
     for (int i = 1; i < n - 1; ++i) {
         smoothed[static_cast<std::size_t>(i)] =
@@ -152,6 +159,8 @@ std::vector<AmCandidate>
         return values.empty() ? globalNoise : median(values);
     };
 
+    // Broadcast FM is handled by FMDetector; skip that range here to avoid
+    // classifying wide FM stations as AM-like carriers.
     std::vector<char> active(static_cast<std::size_t>(n), 0);
     for (int i = 0; i < n; ++i) {
         const double freqHz = sweepStartHz + i * binHz;
@@ -234,19 +243,22 @@ std::vector<AmDetection> AMDetector::detectInIqSegment(
     const std::uint8_t*        iq,
     std::uint32_t              bytesRead,
     double                     tunerCenterHz,
+    double                     sampleRateHz,
     int                        maxIqVerifications,
     int*                       verificationAttempts) const {
     std::vector<AmDetection> detections;
     if (verificationAttempts) *verificationAttempts = 0;
     if (!iq || bytesRead < 4096 || maxIqVerifications <= 0) return detections;
 
+    // Verification reuses the same hop IQ and digitally mixes each candidate to
+    // baseband, avoiding extra hardware retunes during a sweep.
     auto      candidates = findCandidates(spectrum, segmentStartHz, segmentEndHz);
     const int limit      = std::min<int>(maxIqVerifications, static_cast<int>(candidates.size()));
     if (verificationAttempts) *verificationAttempts = limit;
     for (int i = 0; i < limit; ++i) {
         const auto& candidate     = candidates[static_cast<std::size_t>(i)];
         const auto  mixerOffsetHz = tunerCenterHz - candidate.centerHz;
-        auto        features      = analyzeIq(iq, bytesRead, mixerOffsetHz);
+        auto        features      = analyzeIq(iq, bytesRead, mixerOffsetHz, sampleRateHz);
         if (!features.valid) continue;
 
         AmDetection detection;
@@ -270,11 +282,14 @@ std::vector<AmDetection> AMDetector::detectInIqSegment(
 }
 
 AMDetector::IqFeatures
-    AMDetector::analyzeIq(const std::uint8_t* iq, std::uint32_t bytesRead, double mixerOffsetHz) const {
+    AMDetector::analyzeIq(
+        const std::uint8_t* iq, std::uint32_t bytesRead, double mixerOffsetHz, double sampleRateHz) const {
     IqFeatures features;
     if (!iq || bytesRead < 4096) return features;
 
-    const double mixerPhaseInc = 2.0 * M_PI * mixerOffsetHz / static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE);
+    // AM evidence comes from the baseband envelope: audio-band power, carrier
+    // strength, modulation depth, and rejection of strong FM discriminator RMS.
+    const double mixerPhaseInc = 2.0 * M_PI * mixerOffsetHz / sampleRateHz;
     double       oscI          = 1.0;
     double       oscQ          = 0.0;
     const double stepI         = std::cos(mixerPhaseInc);
@@ -334,16 +349,16 @@ AMDetector::IqFeatures
     features.modulationDepth        = envRms / std::max(meanAmp, 1e-12);
     features.fmRmsHz                = fmCount > 0
                            ? std::sqrt(fmSumSq / static_cast<double>(fmCount))
-                                 * static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / (2.0 * M_PI)
+                                 * sampleRateHz / (2.0 * M_PI)
                            : 0.0;
 
     constexpr int fftSize     = 2048;
     auto          envSpectrum = makeHannSpectrum(envelope, fftSize);
     auto          carSpectrum = makeHannSpectrum(carrierBaseband, fftSize);
-    const double  audioDb     = bandPowerDb(envSpectrum, rtl::constants::SCAN_SAMPLE_RATE, 300.0, 8000.0);
-    const double  refDb       = bandPowerDb(envSpectrum, rtl::constants::SCAN_SAMPLE_RATE, 40000.0, 100000.0);
-    const double  carrierDb   = bandPowerDb(carSpectrum, rtl::constants::SCAN_SAMPLE_RATE, 0.0, 1500.0);
-    const double  carrierRef  = bandPowerDb(carSpectrum, rtl::constants::SCAN_SAMPLE_RATE, 20000.0, 80000.0);
+    const double  audioDb     = bandPowerDb(envSpectrum, sampleRateHz, 300.0, 8000.0);
+    const double  refDb       = bandPowerDb(envSpectrum, sampleRateHz, 40000.0, 100000.0);
+    const double  carrierDb   = bandPowerDb(carSpectrum, sampleRateHz, 0.0, 1500.0);
+    const double  carrierRef  = bandPowerDb(carSpectrum, sampleRateHz, 20000.0, 80000.0);
     features.audioSnrDb       = audioDb - refDb;
     features.carrierSnrDb     = carrierDb - carrierRef;
 

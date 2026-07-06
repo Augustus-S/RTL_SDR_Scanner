@@ -1,9 +1,25 @@
 #include "tools/pusher.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <spdlog/spdlog.h>
 
+/**
+ * @file pusher.cpp
+ * @brief Background HTTP publisher for scan spectra and decoded ADS-B state.
+ */
+
 namespace rtl::tools {
+
+namespace {
+
+std::int64_t steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+} // namespace
 
 Pusher::Pusher(const std::string& url) {
     url_        = url;
@@ -11,6 +27,8 @@ Pusher::Pusher(const std::string& url) {
 }
 
 Pusher::~Pusher() {
+    constexpr std::int64_t DRAIN_TIMEOUT_MS = 5000;
+    drainDeadlineMs_.store(steadyNowMs() + DRAIN_TIMEOUT_MS);
     loop_ = false;
     if (workThread_.joinable()) workThread_.join();
 }
@@ -30,6 +48,8 @@ void Pusher::pushScanHop(nlohmann::json jsonData) {
 std::unordered_map<std::string, rtl::sda_b::Aircraft> Pusher::filterLatestAircraft(AircraftQueue& queue) {
     std::unordered_map<std::string, rtl::sda_b::Aircraft> latestData;
 
+    // ADS-B callbacks can enqueue many updates for the same aircraft between
+    // pushes. Keep only the newest state per UUID to bound payload size.
     for (auto& aircraft : queue) {
         auto it = latestData.find(aircraft.uuid);
         if (it == latestData.end()) {
@@ -51,8 +71,14 @@ bool Pusher::hasPendingData() const {
     return !aircraftQueue_.empty() || !scanQueue_.empty();
 }
 
+bool Pusher::shouldContinueWork() const {
+    if (loop_.load()) return true;
+    const auto deadlineMs = drainDeadlineMs_.load();
+    return deadlineMs > 0 && steadyNowMs() < deadlineMs && hasPendingData();
+}
+
 void Pusher::work() {
-    while (loop_ || hasPendingData()) {
+    while (shouldContinueWork()) {
         for (int i = 0; i < 10 && loop_; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); }
 
         std::unordered_map<std::string, rtl::sda_b::Aircraft> latestData;
@@ -60,6 +86,8 @@ void Pusher::work() {
 
         {
             std::lock_guard<std::mutex> _(lock_);
+            // Move queued data out under lock, then perform network I/O without
+            // blocking producers in the scanner and ADS-B demodulator.
             if (!aircraftQueue_.empty()) {
                 latestData = filterLatestAircraft(aircraftQueue_);
                 aircraftQueue_.clear();
@@ -80,11 +108,26 @@ void Pusher::work() {
             post(url_, jsonData.dump(), 3);
         }
 
-        for (auto& scanJson : scanBatch) {
+        for (std::size_t i = 0; i < scanBatch.size(); ++i) {
+            if (!loop_.load() && drainDeadlineMs_.load() > 0 && steadyNowMs() >= drainDeadlineMs_.load()) {
+                spdlog::warn("Pusher dropped {} scan payloads after shutdown drain timeout", scanBatch.size() - i);
+                break;
+            }
+            auto& scanJson = scanBatch[i];
             spdlog::info("pushScanHop, batch_size={}", scanBatch.size());
             std::string result = post(url_, scanJson.dump(), 3);
             if (result.empty()) { spdlog::warn("pushScanHop post returned empty, data may be lost"); }
         }
+    }
+
+    std::lock_guard<std::mutex> _(lock_);
+    if (!aircraftQueue_.empty() || !scanQueue_.empty()) {
+        spdlog::warn(
+            "Pusher dropped pending data on shutdown: aircraft={}, scan={}",
+            aircraftQueue_.size(),
+            scanQueue_.size());
+        aircraftQueue_.clear();
+        scanQueue_.clear();
     }
 }
 

@@ -30,6 +30,16 @@
 
 #include <unistd.h>
 
+/**
+ * @file fm_broadcast_player.cpp
+ * @brief Standalone WBFM receiver/player for RTL-SDR broadcast FM testing.
+ *
+ * The example keeps the full pipeline in one file: RTL-SDR unsigned 8-bit IQ is
+ * optionally offset-mixed away from the DC spike, low-pass filtered, FM
+ * discriminated into a multiplex composite signal, optionally stereo decoded,
+ * de-emphasized, and written as signed 16-bit PCM to ALSA or stdout.
+ */
+
 namespace {
 
 constexpr std::uint32_t kDefaultDeviceIndex = 0;
@@ -84,6 +94,12 @@ void initLogging() {
     spdlog::flush_every(std::chrono::seconds(3));
 }
 
+/**
+ * @brief Runtime options for the standalone FM player.
+ *
+ * User-facing frequency and gain options are normalized to Hz and tenths of dB
+ * during argument parsing so the DSP and device setup code can stay unit-stable.
+ */
 struct Config {
     std::uint32_t deviceIndex  = kDefaultDeviceIndex;
     std::uint32_t frequencyHz  = kDefaultFrequencyHz;
@@ -312,6 +328,12 @@ std::string makeTimestampedIqFilename() {
     return oss.str();
 }
 
+/**
+ * @brief Lightweight runtime counters for validating receive and playback rates.
+ *
+ * The class intentionally accumulates only RMS/peak aggregates so enabling
+ * stats does not turn the real-time receive loop into a logging bottleneck.
+ */
 class DebugStats {
 public:
     explicit DebugStats(bool enabled)
@@ -443,6 +465,12 @@ private:
     std::uint64_t iqBytes_ = 0;
 };
 
+/**
+ * @brief Build a normalized Hamming-windowed low-pass FIR.
+ *
+ * The same helper is used at RF, composite, and audio rates; normalization keeps
+ * passband gain close to unity across those stages.
+ */
 std::vector<double> makeLowPassFir(int taps, double cutoffHz, double sampleRate) {
     std::vector<double> h(static_cast<std::size_t>(taps));
     const int           mid = taps / 2;
@@ -461,6 +489,14 @@ std::vector<double> makeLowPassFir(int taps, double cutoffHz, double sampleRate)
     return h;
 }
 
+/**
+ * @brief Stateful WBFM demodulation pipeline.
+ *
+ * Processing order is: optional digital offset mixer, optional RF FIR,
+ * quadrature discriminator, composite filtering/decimation, mono L+R path,
+ * optional 19 kHz pilot PLL and L-R stereo path, de-emphasis, volume scaling,
+ * and final s16le PCM conversion.
+ */
 class WbfmDemodulator {
 public:
     explicit WbfmDemodulator(const Config& cfg, DebugStats* debugStats)
@@ -489,6 +525,13 @@ public:
         return stereoOn_ ? 2 : 1;
     }
 
+    /**
+     * @brief Convert one RTL-SDR IQ block into zero or more PCM frames.
+     *
+     * The demodulator keeps filter rings, discriminator history, PLL phase, and
+     * de-emphasis state across calls because arbitrary read boundaries do not
+     * align with DSP filter or audio-frame boundaries.
+     */
     void processIq(const std::uint8_t* iq, int bytes, std::vector<std::int16_t>& pcm) {
         pcm.clear();
         pcm.reserve(static_cast<std::size_t>(bytes / (2 * kDecimation) * outputChannels()));
@@ -497,6 +540,8 @@ public:
             const double rawI = (static_cast<double>(iq[idx]) - 127.5) / 127.5;
             const double rawQ = (static_cast<double>(iq[idx + 1]) - 127.5) / 127.5;
             if (debugStats_) { debugStats_->addRaw(rawI, rawQ); }
+            // Offset tuning places the tuner away from the DC spike; this
+            // software mixer translates the requested station back to baseband.
             const double i = rawI * mixerOscI_ - rawQ * mixerOscQ_;
             const double q = rawI * mixerOscQ_ + rawQ * mixerOscI_;
 
@@ -530,6 +575,8 @@ public:
                 continue;
             }
 
+            // Quadrature discriminator: angle difference between adjacent IQ
+            // samples, normalized by instantaneous power to reduce AM sensitivity.
             const double imag  = filteredQ * prevI_ - filteredI * prevQ_;
             const double power = filteredI * filteredI + filteredQ * filteredQ + 1e-12;
             prevI_             = filteredI;
@@ -545,6 +592,9 @@ public:
             if (debugStats_) { debugStats_->addComposite(composite); }
             pushSumSample(composite);
             if (stereoOn_) {
+                // Stereo decoding locks to the 19 kHz pilot, doubles its phase
+                // to regenerate the 38 kHz suppressed subcarrier, then extracts
+                // the L-R channel before audio-rate decimation.
                 updatePilotPll(composite);
                 const double stereoDiffBaseband = 2.0 * composite * std::cos(2.0 * pilotPhase_);
                 pushDiffSample(stereoDiffBaseband);
@@ -618,6 +668,9 @@ private:
         return acc;
     }
 
+    /**
+     * @brief Track the 19 kHz FM stereo pilot with a small second-order PLL.
+     */
     void updatePilotPll(double composite) {
         if (!stereoOn_) return;
 
@@ -717,6 +770,13 @@ private:
     double              volume_;
 };
 
+/**
+ * @brief Asynchronous ALSA playback sink with a bounded queue.
+ *
+ * The receive loop must keep reading the RTL-SDR in real time. Audio writes
+ * happen on a worker thread, and the queue drops oldest frames if playback falls
+ * behind instead of allowing SDR reads to stall.
+ */
 class AlsaAudioSink {
 public:
     AlsaAudioSink(int channels, std::string requestedDevice)
@@ -913,6 +973,12 @@ private:
     std::size_t lastReportedDroppedFrames_ = 0;
 };
 
+/**
+ * @brief Configure the RTL-SDR for WBFM receive.
+ *
+ * Offset tuning intentionally tunes above the station and relies on the digital
+ * mixer in WbfmDemodulator to shift the station back to baseband.
+ */
 bool configureDevice(rtlsdr_dev_t* dev, const Config& cfg) {
     int ret = rtlsdr_set_sample_rate(dev, kSdrSampleRate);
     if (ret < 0) {
@@ -1095,6 +1161,8 @@ int main(int argc, char* argv[]) {
     std::uint64_t writtenAudioFrames = 0;
     bool          audioStarted        = !cfg.audioOn;
 
+    // Main loop: keep reads synchronous and short, then immediately hand audio
+    // to the demodulator/sink so the dongle buffer does not overrun.
     while (!gStop.load()) {
         int nRead = 0;
         int ret   = rtlsdr_read_sync(dev, iq.data(), static_cast<int>(iq.size()), &nRead);

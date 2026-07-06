@@ -7,6 +7,11 @@
 #include <fftw3.h>
 #include <spdlog/spdlog.h>
 
+/**
+ * @file fm_detector.cpp
+ * @brief FM broadcast detector using spectrum candidates and IQ feature checks.
+ */
+
 namespace rtl::scanner {
 
 namespace {
@@ -154,6 +159,8 @@ std::vector<FmCandidate>
     const int                n = static_cast<int>(spectrum.size());
     if (n < 8 || sweepEndHz <= sweepStartHz) return candidates;
 
+    // Restrict candidate search to the broadcast FM band even when a scan range
+    // spans other services.
     const double detectStartHz = std::max<double>(sweepStartHz, config_.fmBandMinHz);
     const double detectEndHz   = std::min<double>(sweepEndHz, config_.fmBandMaxHz);
     if (detectEndHz <= detectStartHz) return candidates;
@@ -163,6 +170,8 @@ std::vector<FmCandidate>
     const int    lastBin  = std::min(n - 1, static_cast<int>(std::ceil((detectEndHz - sweepStartHz) / binHz)));
     if (lastBin <= firstBin) return candidates;
 
+    // Wide FM stations occupy many adjacent bins. Smooth before thresholding and
+    // merge short inactive gaps so multipath/notches do not split one station.
     std::vector<double> smoothed(spectrum);
     for (int i = firstBin + 2; i <= lastBin - 2; ++i) {
         smoothed[static_cast<std::size_t>(i)] =
@@ -264,9 +273,11 @@ std::vector<FmCandidate>
 std::vector<FmDetection> FMDetector::verifyCandidates(
     PersistentAsyncReader&          reader,
     const std::vector<FmCandidate>& candidates,
+    double                          sampleRateHz,
     const std::function<bool()>&    shouldContinue) const {
     std::vector<FmDetection> detections;
     int                      verifiedCount = 0;
+    if (sampleRateHz <= 0.0) return detections;
 
     for (const auto& candidate : candidates) {
         if (shouldContinue && !shouldContinue()) break;
@@ -284,19 +295,30 @@ std::vector<FmDetection> FMDetector::verifyCandidates(
         detection.confidence  = candidate.confidence;
 
         const std::uint32_t readLen =
-            static_cast<std::uint32_t>(rtl::constants::SCAN_SAMPLE_RATE * 2.0 * config_.iqVerifyDurationMs / 1000.0);
+            static_cast<std::uint32_t>(sampleRateHz * 2.0 * config_.iqVerifyDurationMs / 1000.0);
         std::vector<std::uint8_t> iq(readLen);
         std::uint32_t             outLen = readLen;
         const auto                tuneHz = static_cast<std::uint32_t>(std::clamp(
             candidate.centerHz + config_.verifyTuningOffsetHz,
             static_cast<double>(rtl::constants::MIN_FREQ),
             static_cast<double>(rtl::constants::MAX_FREQ)));
-        auto                      result =
-            reader.read(iq.data(), &outLen, tuneHz, 0, rtl::constants::READ_TIMEOUT_MS, 50);
+        auto                      result = reader.read(
+            iq.data(),
+            &outLen,
+            tuneHz,
+            0,
+            rtl::constants::READ_TIMEOUT_MS,
+            50,
+            ResetPolicy::ALWAYS,
+            true);
         ++verifiedCount;
 
         if (result == PersistentAsyncReader::ReadResult::SUCCESS) {
-            auto features = analyzeIq(iq.data(), outLen, static_cast<double>(config_.verifyTuningOffsetHz));
+            auto features = analyzeIq(
+                iq.data(),
+                outLen,
+                static_cast<double>(config_.verifyTuningOffsetHz),
+                sampleRateHz);
             const bool strongEnoughWeakPilot =
                 features.pilotSnrDb >= config_.weakPilotSnrDb && candidate.snrDb >= config_.strongSpectrumSnrDb;
             const bool featureAccepted =
@@ -331,19 +353,22 @@ std::vector<FmDetection> FMDetector::detectInIqSegment(
     const std::uint8_t*        iq,
     std::uint32_t              bytesRead,
     double                     tunerCenterHz,
+    double                     sampleRateHz,
     int                        maxIqVerifications,
     int*                       verificationAttempts) const {
     std::vector<FmDetection> detections;
     if (verificationAttempts) *verificationAttempts = 0;
     if (!iq || bytesRead < 4096 || maxIqVerifications <= 0) return detections;
 
+    // Fast path used by ScanEngine: verify candidates against the IQ already
+    // captured for this hop instead of spending extra retunes per candidate.
     auto      candidates = findCandidates(spectrum, segmentStartHz, segmentEndHz);
     const int limit      = std::min<int>(maxIqVerifications, static_cast<int>(candidates.size()));
     if (verificationAttempts) *verificationAttempts = limit;
     for (int i = 0; i < limit; ++i) {
         const auto& candidate     = candidates[static_cast<std::size_t>(i)];
         const auto  mixerOffsetHz = tunerCenterHz - candidate.centerHz;
-        auto        features      = analyzeIq(iq, bytesRead, mixerOffsetHz);
+        auto        features      = analyzeIq(iq, bytesRead, mixerOffsetHz, sampleRateHz);
         if (!features.valid) continue;
         const bool strongEnoughWeakPilot =
             features.pilotSnrDb >= config_.weakPilotSnrDb && candidate.snrDb >= config_.strongSpectrumSnrDb;
@@ -377,7 +402,8 @@ std::vector<FmDetection> FMDetector::detectInIqSegment(
 }
 
 FMDetector::IqFeatures
-    FMDetector::analyzeIq(const std::uint8_t* iq, std::uint32_t bytesRead, double mixerOffsetHz) const {
+    FMDetector::analyzeIq(
+        const std::uint8_t* iq, std::uint32_t bytesRead, double mixerOffsetHz, double sampleRateHz) const {
     IqFeatures features;
     if (bytesRead < 4096 || !iq) return features;
 
@@ -385,7 +411,9 @@ FMDetector::IqFeatures
     std::vector<double> composite;
     composite.reserve(samples > 0 ? samples - 1 : 0);
 
-    const double mixerPhaseInc = 2.0 * M_PI * mixerOffsetHz / static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE);
+    // Mix the candidate to baseband, run a quadrature discriminator, then look
+    // for audio energy, 19 kHz pilot, optional RDS, and FM-like deviation.
+    const double mixerPhaseInc = 2.0 * M_PI * mixerOffsetHz / sampleRateHz;
     double       oscI          = 1.0;
     double       oscQ          = 0.0;
     const double stepI         = std::cos(mixerPhaseInc);
@@ -436,7 +464,7 @@ FMDetector::IqFeatures
     if (composite.size() < 4096) return features;
 
     const double rms     = std::sqrt(sumSq / static_cast<double>(composite.size()));
-    features.fmRmsHz     = rms * static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / (2.0 * M_PI);
+    features.fmRmsHz     = rms * sampleRateHz / (2.0 * M_PI);
     features.deviationHz = features.fmRmsHz;
     if (ampCount > 0 && ampSqSum > 0.0) {
         const double meanAmp  = ampSum / static_cast<double>(ampCount);
@@ -447,12 +475,12 @@ FMDetector::IqFeatures
     }
 
     constexpr int fftSize  = 2048;
-    auto          spectrum = makeHannSpectrum(composite, rtl::constants::SCAN_SAMPLE_RATE, fftSize);
-    const double  audioDb  = bandPowerDb(spectrum, rtl::constants::SCAN_SAMPLE_RATE, 300.0, 15000.0);
-    const double  refDb    = bandPowerDb(spectrum, rtl::constants::SCAN_SAMPLE_RATE, 70000.0, 100000.0);
+    auto          spectrum = makeHannSpectrum(composite, static_cast<std::uint32_t>(sampleRateHz), fftSize);
+    const double  audioDb  = bandPowerDb(spectrum, sampleRateHz, 300.0, 15000.0);
+    const double  refDb    = bandPowerDb(spectrum, sampleRateHz, 70000.0, 100000.0);
     features.audioSnrDb    = audioDb - refDb;
-    features.pilotSnrDb    = peakSnrDb(spectrum, rtl::constants::SCAN_SAMPLE_RATE, config_.pilotFreqHz, 600.0, 2200.0);
-    features.rdsSnrDb      = peakSnrDb(spectrum, rtl::constants::SCAN_SAMPLE_RATE, config_.rdsFreqHz, 1200.0, 3500.0);
+    features.pilotSnrDb    = peakSnrDb(spectrum, sampleRateHz, config_.pilotFreqHz, 600.0, 2200.0);
+    features.rdsSnrDb      = peakSnrDb(spectrum, sampleRateHz, config_.rdsFreqHz, 1200.0, 3500.0);
     features.stereo        = features.pilotSnrDb >= config_.minPilotSnrDb;
     features.rds           = features.rdsSnrDb >= config_.minPilotSnrDb;
 

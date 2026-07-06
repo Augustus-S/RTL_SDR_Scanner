@@ -10,6 +10,11 @@
 #include <algorithm>
 #include <spdlog/spdlog.h>
 
+/**
+ * @file ads_b_demodulator.cpp
+ * @brief Mode-S / ADS-B demodulation, message validation, and aircraft tracking.
+ */
+
 namespace rtl::sda_b {
 
 static constexpr int MODES_PREAMBLE_US     = 8;   // Mode-S preamble duration in microseconds.
@@ -144,6 +149,8 @@ void ADSBDemodulator::initErrorInfo() {
     std::memset(bitErrorTable_, 0, sizeof(bitErrorTable_));
     int n = 0; // Number of populated entries in the bit error lookup table.
 
+    // Precompute CRC syndromes for one- and two-bit errors. At runtime the
+    // syndrome lookup is much cheaper than trying all correction positions.
     for (int i = 5; i < MODES_LONG_MSG_BITS; i++) {
         int bp0       = (i >> 3);           // Byte position of the first synthetic flipped bit.
         int mask0     = 1 << (7 - (i & 7)); // Bit mask for the first synthetic flipped bit.
@@ -178,6 +185,8 @@ void ADSBDemodulator::processIq(const uint8_t* data, uint32_t len) {
     if (!data_ || !data || len == 0) return;
     if (len > MODES_DATA_LEN) len = MODES_DATA_LEN;
 
+    // Preserve overlap so a preamble/payload that begins near the end of one
+    // async block can still be decoded when the next block arrives.
     uint32_t tail_size = (MODES_FULL_LEN - 1) * 4; // Overlap retained to catch messages crossing block boundaries.
     std::memmove(data_.get(), data_.get() + MODES_DATA_LEN, tail_size);
     std::memcpy(data_.get() + tail_size, data, len);

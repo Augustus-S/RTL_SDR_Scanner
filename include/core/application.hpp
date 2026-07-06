@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include "ads_b/adsb_engine.hpp"
@@ -14,12 +15,20 @@
 
 namespace rtl::core {
 
+/**
+ * @brief Initial application configuration parsed from CLI or the interactive menu.
+ *
+ * Frequency values are in Hz. scanSampleRateHz may be zero, in which case the
+ * application selects the default sample rate for scanProfile.
+ */
 struct AppConfig {
     bool   adsbEnabled = false;
     bool   scanEnabled = false;
     double startFreqHz = 10e6;
     double endFreqHz   = 100e6;
     rtl::scanner::ScanProfile scanProfile = rtl::scanner::ScanProfile::BALANCED;
+    std::uint32_t scanSampleRateHz = 0;
+    rtl::scanner::ResetPolicy resetPolicy = rtl::scanner::ResetPolicy::ADAPTIVE;
 };
 
 class Application {
@@ -47,9 +56,8 @@ private:
 
     std::atomic<bool>          adsbEnabled_{false};
     std::atomic<bool>          scanEnabled_{false};
-    std::atomic<std::uint32_t> startFreq_{0};
-    std::atomic<std::uint32_t> endFreq_{0};
-    std::atomic<rtl::scanner::ScanProfile> scanProfile_{rtl::scanner::ScanProfile::BALANCED};
+    std::mutex                 scanConfigMutex_;
+    ScanRuntimeConfig          scanConfig_;
     std::atomic<int>           maxGain_{0};
 
     std::unique_ptr<rtl::scanner::RtlSdrDevice> device_;

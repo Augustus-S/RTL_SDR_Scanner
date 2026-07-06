@@ -6,10 +6,26 @@
 #include "scanner/scan_profile.hpp"
 #include "tools/tools.hpp"
 
+/**
+ * @file RTL_SDR.cpp
+ * @brief Command-line entry point for the scanner/ADS-B application.
+ *
+ * This file owns only startup concerns: parse CLI or interactive input, normalize
+ * user-facing MHz values into the Hz-based AppConfig contract, validate the scan
+ * range, and hand control to rtl::core::Application for device/thread lifetime.
+ */
+
 namespace {
 
+/**
+ * @brief Parse non-interactive command-line options into AppConfig.
+ *
+ * CLI frequency values are accepted in MHz for operator convenience. The rest of
+ * the application uses Hz, so conversion happens here before validation.
+ */
 rtl::core::AppConfig parseArgs(int argc, char* argv[]) {
     rtl::core::AppConfig config;
+    bool sampleRateExplicit = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -22,13 +38,15 @@ rtl::core::AppConfig parseArgs(int argc, char* argv[]) {
                       << "  --start-freq <MHz>    Scan start frequency (10-1070 MHz)\n"
                       << "  --end-freq <MHz>      Scan end frequency (10-1070 MHz)\n"
                       << "  --scan-profile <name> Scan speed profile: fast|balanced|accurate (default: balanced)\n"
+                      << "  --scan-sample-rate <rate> Scan sample rate: 2.0|2.4|3.2 MHz\n"
+                      << "  --reset-policy <name> Reset policy: adaptive|always (default: adaptive)\n"
                       << "  --adsb                Enable ADS-B decoding\n"
                       << "  --scan                Enable frequency scanning\n"
                       << "  --help, -h            Show this help message\n\n"
                       << "Frequency range: 10 MHz - 1070 MHz\n"
                       << "Maximum bandwidth: 100 MHz\n"
                       << "Data output: 127.0.0.1:23568\n"
-                      << "Control port: 127.0.0.1:23569\n";
+                      << "Control listen: 0.0.0.0:23569 (local access: 127.0.0.1:23569)\n";
             exit(0);
         } else if (arg == "--mode" && i + 1 < argc) {
             int mode = std::atoi(argv[++i]);
@@ -53,6 +71,27 @@ rtl::core::AppConfig parseArgs(int argc, char* argv[]) {
                 exit(1);
             }
             config.scanProfile = profile;
+            if (!sampleRateExplicit) {
+                config.scanSampleRateHz = rtl::scanner::defaultSampleRateForProfile(profile);
+            }
+        } else if (arg == "--scan-sample-rate" && i + 1 < argc) {
+            const double rawRate = std::atof(argv[++i]);
+            const auto sampleRateHz = static_cast<std::uint32_t>(rawRate < 10000.0 ? rawRate * 1e6 : rawRate);
+            if (!rtl::scanner::isSupportedScanSampleRate(sampleRateHz)) {
+                std::cerr << "Error: Invalid scan sample rate. Expected 2.0, 2.4, or 3.2 MHz\n";
+                exit(1);
+            }
+            config.scanSampleRateHz = sampleRateHz;
+            sampleRateExplicit = true;
+        } else if (arg == "--reset-policy" && i + 1 < argc) {
+            rtl::scanner::ResetPolicy policy;
+            std::string               value = argv[++i];
+            if (!rtl::scanner::parseResetPolicy(value, policy)) {
+                std::cerr << "Error: Invalid reset policy '" << value << "'. Expected "
+                          << rtl::scanner::resetPolicyChoices() << "\n";
+                exit(1);
+            }
+            config.resetPolicy = policy;
         } else if (arg == "--adsb") {
             config.adsbEnabled = true;
         } else if (arg == "--scan") {
@@ -134,11 +173,18 @@ rtl::core::AppConfig interactiveMenu() {
         } else {
             config.scanProfile = rtl::scanner::ScanProfile::BALANCED;
         }
+        config.scanSampleRateHz = rtl::scanner::defaultSampleRateForProfile(config.scanProfile);
     }
 
     return config;
 }
 
+/**
+ * @brief Validate the completed startup configuration before hardware access.
+ *
+ * Keeping these checks at the boundary prevents invalid ranges or unsupported
+ * sample rates from reaching the radio loop and HTTP-updatable runtime config.
+ */
 bool validateConfig(const rtl::core::AppConfig& config) {
     if (!config.adsbEnabled && !config.scanEnabled) {
         std::cerr << "Error: No functionality selected\n";
@@ -169,6 +215,13 @@ bool validateConfig(const rtl::core::AppConfig& config) {
             std::cerr << "Error: Invalid scan profile\n";
             return false;
         }
+        const auto sampleRateHz =
+            config.scanSampleRateHz == 0 ? rtl::scanner::defaultSampleRateForProfile(config.scanProfile)
+                                         : config.scanSampleRateHz;
+        if (!rtl::scanner::isSupportedScanSampleRate(sampleRateHz)) {
+            std::cerr << "Error: Invalid scan sample rate\n";
+            return false;
+        }
     }
     return true;
 }
@@ -178,6 +231,8 @@ bool validateConfig(const rtl::core::AppConfig& config) {
 int main(int argc, char* argv[]) {
     rtl::tools::initSpdlog();
 
+    // Startup has exactly one configuration source: CLI when arguments are
+    // present, otherwise the interactive menu for local/manual operation.
     rtl::core::AppConfig config;
     if (argc > 1) {
         config = parseArgs(argc, argv);

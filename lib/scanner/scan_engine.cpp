@@ -7,6 +7,11 @@
 #include <cmath>
 #include <nlohmann/json.hpp>
 
+/**
+ * @file scan_engine.cpp
+ * @brief Frequency sweep engine, spectrum stitching, and AM/FM detection output.
+ */
+
 namespace rtl::scanner {
 
 namespace {
@@ -71,7 +76,9 @@ ScanEngine::~ScanEngine() {
 void ScanEngine::start() {
     if (running_.exchange(true)) return;
 
-    rtlsdr_set_sample_rate(dev_, rtl::constants::SCAN_SAMPLE_RATE);
+    const auto profileConfig = configForProfile(scanProfile_.load(), scanSampleRateHz_.load());
+    configureSampleRate(profileConfig.sampleRateHz);
+    forceNextReset_ = true;
     reader_ = std::make_unique<PersistentAsyncReader>(dev_);
 }
 
@@ -105,12 +112,96 @@ ScanProfile ScanEngine::getScanProfile() const {
     return scanProfile_.load();
 }
 
+void ScanEngine::setScanSampleRate(std::uint32_t sampleRateHz) {
+    scanSampleRateHz_.store(sampleRateHz);
+}
+
+std::uint32_t ScanEngine::getScanSampleRate() const {
+    return activeSampleRateHz_ != 0 ? activeSampleRateHz_ : scanSampleRateHz_.load();
+}
+
+void ScanEngine::setResetPolicy(ResetPolicy policy) {
+    resetPolicy_.store(policy);
+}
+
+ResetPolicy ScanEngine::getResetPolicy() const {
+    return resetPolicy_.load();
+}
+
+void ScanEngine::resetSweepHistory() {
+    // History is tied to the scan frequency grid. Reusing it after a range,
+    // profile, or sample-rate change would smear old spectrum/detections into a
+    // different set of bins.
+    prevSpectrum_.clear();
+    hasPrevSpectrum_ = false;
+    fmTracks_.clear();
+    amTracks_.clear();
+    currentFmDetections_.clear();
+    currentAmDetections_.clear();
+    forceNextReset_     = true;
+    lastDirectSampling_ = -1;
+}
+
+bool ScanEngine::configureSampleRate(std::uint32_t requestedRateHz) {
+    std::vector<std::uint32_t> candidates;
+    candidates.push_back(requestedRateHz);
+    if (requestedRateHz > 2400000) candidates.push_back(2400000);
+    if (requestedRateHz > 2000000) candidates.push_back(2000000);
+
+    // Some dongles reject the fastest profile rates. Fall back in descending
+    // order while publishing the active rate back through getScanSampleRate().
+    for (auto rate : candidates) {
+        if (rate == activeSampleRateHz_) return true;
+        const int ret = rtlsdr_set_sample_rate(dev_, rate);
+        if (ret == 0) {
+            if (rate != requestedRateHz) {
+                spdlog::warn(
+                    "Requested scan sample rate {} MS/s failed, using fallback {} MS/s",
+                    requestedRateHz / 1e6,
+                    rate / 1e6);
+            }
+            activeSampleRateHz_ = rate;
+            scanSampleRateHz_.store(rate);
+            forceNextReset_ = true;
+            lastDirectSampling_ = -1;
+            return true;
+        }
+        spdlog::warn("Failed to set scan sample rate {} MS/s: error {}", rate / 1e6, ret);
+    }
+    return false;
+}
+
 ScanEngine::SweepResult ScanEngine::doOneSweep(const std::function<bool()>& shouldContinue) {
     if (!running_ || !reader_) return SweepResult::STOPPED;
 
     std::uint32_t sweep_start_freq = startFreq_.load();
     std::uint32_t sweep_end_freq   = endFreq_.load();
-    const auto    profileConfig    = configForProfile(scanProfile_.load());
+    if (sweep_end_freq <= sweep_start_freq) {
+        spdlog::warn("Invalid scan range: {} - {} Hz", sweep_start_freq, sweep_end_freq);
+        return SweepResult::STOPPED;
+    }
+
+    auto          profileConfig    = configForProfile(scanProfile_.load(), scanSampleRateHz_.load());
+    if (!configureSampleRate(profileConfig.sampleRateHz)) {
+        running_ = false;
+        return SweepResult::DEVICE_ERROR;
+    }
+    profileConfig = configForProfile(scanProfile_.load(), activeSampleRateHz_);
+    const auto activeProfile = profileConfig.profile;
+
+    const bool configChanged =
+        !hasLastSweepConfig_ || lastSweepStartFreq_ != sweep_start_freq || lastSweepEndFreq_ != sweep_end_freq
+        || lastSweepSampleRateHz_ != activeSampleRateHz_ || lastSweepProfile_ != activeProfile;
+    if (configChanged) {
+        // A new scan grid invalidates smoothing and track memory even if the
+        // resulting stitched spectrum happens to have the same number of bins.
+        resetSweepHistory();
+        hasLastSweepConfig_    = true;
+        lastSweepStartFreq_    = sweep_start_freq;
+        lastSweepEndFreq_      = sweep_end_freq;
+        lastSweepSampleRateHz_ = activeSampleRateHz_;
+        lastSweepProfile_      = activeProfile;
+    }
 
     auto                     sweep_start = std::chrono::steady_clock::now();
     std::vector<SegmentData> segments;
@@ -118,8 +209,11 @@ ScanEngine::SweepResult ScanEngine::doOneSweep(const std::function<bool()>& shou
     currentAmDetections_.clear();
     currentFmIqBudget_ = profileConfig.maxFmIqVerifications;
     currentAmIqBudget_ = profileConfig.maxAmIqVerifications;
+    sweepResetCount_ = 0;
     int hopCount = 0;
 
+    // Each hop is centered at the current sweep frequency and covers roughly one
+    // sample-rate-wide slice; profile step controls overlap versus speed.
     for (std::uint32_t cur_freq = sweep_start_freq;
          cur_freq <= sweep_end_freq && running_ && (!shouldContinue || shouldContinue());
          cur_freq += profileConfig.stepHz) {
@@ -140,8 +234,13 @@ ScanEngine::SweepResult ScanEngine::doOneSweep(const std::function<bool()>& shou
         const auto elapsedMs = sweep_elapsed.count();
         const auto avgHopMs  = hopCount > 0 ? static_cast<double>(elapsedMs) / static_cast<double>(hopCount) : 0.0;
         spdlog::info(
-            "Sweep complete: profile={}, hops={}, took={} ms, avg_hop={:.1f} ms, fm={}, am={}",
+            "Sweep complete: profile={}, sample_rate={} MS/s, step={} MHz, settle={} ms, reset_policy={}, resets={}, hops={}, took={} ms, avg_hop={:.1f} ms, fm={}, am={}",
             profileConfig.name,
+            activeSampleRateHz_ / 1e6,
+            profileConfig.stepHz / 1e6,
+            profileConfig.tuneSettleMs,
+            resetPolicyName(resetPolicy_.load()),
+            sweepResetCount_,
             hopCount,
             elapsedMs,
             avgHopMs,
@@ -158,15 +257,27 @@ bool ScanEngine::processOneHop(
     const ScanProfileConfig&       profileConfig,
     std::vector<SegmentData>&      segments) {
     std::uint32_t n_read = 4 * rtl::constants::FFT_SIZE * 2;
+    const bool forceReset            = forceNextReset_;
+    const bool directSamplingChanged = directSampling != lastDirectSampling_;
+    const auto resetPolicy           = resetPolicy_.load();
+    if (resetPolicy == ResetPolicy::ALWAYS || forceReset || directSamplingChanged) {
+        ++sweepResetCount_;
+    }
+    // Read one short IQ block after hardware tuning/settling. The reader owns
+    // direct-sampling switches and buffer resets so the sweep loop stays linear.
     auto          scan_result = reader_->read(
         bufferU8_.data(),
         &n_read,
         centerFreq,
         directSampling,
         rtl::constants::READ_TIMEOUT_MS,
-        profileConfig.tuneSettleMs);
+        profileConfig.tuneSettleMs,
+        resetPolicy,
+        forceReset);
+    forceNextReset_ = false;
 
     if (scan_result != PersistentAsyncReader::ReadResult::SUCCESS) {
+        forceNextReset_ = true;
         if (scan_result == PersistentAsyncReader::ReadResult::DEVICE_ERROR) {
             spdlog::error("Device error @ {} MHz, aborting", centerFreq / 1e6);
             running_ = false;
@@ -176,6 +287,7 @@ bool ScanEngine::processOneHop(
         }
         return true;
     }
+    lastDirectSampling_ = directSampling;
 
     int samples = static_cast<int>(n_read / 2);
     samples     = std::min<int>(samples, static_cast<int>(bufferIQ_.size()));
@@ -186,6 +298,8 @@ bool ScanEngine::processOneHop(
         bufferQ_[i]  = Q;
     }
 
+    // FFT power uses centered complex IQ. Direct-sampling RSSI later uses the Q
+    // channel directly because only one ADC path carries the low-frequency signal.
     rtl::tools::removeDc(bufferIQ_.data(), samples);
 
     auto [fft_power_sum, groups_num] = fftEngine_.accumulatePower(bufferIQ_.data(), samples);
@@ -202,15 +316,18 @@ bool ScanEngine::processOneHop(
     spdlog::debug("Scan Freq: {} MHz, RSSI: {} dBFS", centerFreq / 1e6, rssi);
     std::vector<double> spectrum_db = rtl::tools::spectrumToDb(fft_power_sum, groups_num);
     rtl::tools::suppressDcSpike(spectrum_db);
+    // Detector budgets keep expensive IQ feature checks bounded per sweep while
+    // still allowing strong candidates from multiple hops through.
     if (currentFmIqBudget_ > 0) {
         int  attempts   = 0;
         auto detections = fmDetector_.detectInIqSegment(
             spectrum_db,
-            static_cast<double>(centerFreq) - static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
-            static_cast<double>(centerFreq) + static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+            static_cast<double>(centerFreq) - static_cast<double>(activeSampleRateHz_) / 2.0,
+            static_cast<double>(centerFreq) + static_cast<double>(activeSampleRateHz_) / 2.0,
             bufferU8_.data(),
             n_read,
             static_cast<double>(centerFreq),
+            static_cast<double>(activeSampleRateHz_),
             currentFmIqBudget_,
             &attempts);
         currentFmIqBudget_ -= std::min(currentFmIqBudget_, attempts);
@@ -220,11 +337,12 @@ bool ScanEngine::processOneHop(
         int  attempts     = 0;
         auto amDetections = amDetector_.detectInIqSegment(
             spectrum_db,
-            static_cast<double>(centerFreq) - static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
-            static_cast<double>(centerFreq) + static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE) / 2.0,
+            static_cast<double>(centerFreq) - static_cast<double>(activeSampleRateHz_) / 2.0,
+            static_cast<double>(centerFreq) + static_cast<double>(activeSampleRateHz_) / 2.0,
             bufferU8_.data(),
             n_read,
             static_cast<double>(centerFreq),
+            static_cast<double>(activeSampleRateHz_),
             currentAmIqBudget_,
             &attempts);
         currentAmIqBudget_ -= std::min(currentAmIqBudget_, attempts);
@@ -241,13 +359,15 @@ void ScanEngine::spliceAndPush(
     const std::function<bool()>&    shouldContinue) {
     auto [spliced_spectrum, spliced_freqs] = rtl::tools::spliceSpectrum(
         segments,
-        static_cast<double>(rtl::constants::SCAN_SAMPLE_RATE),
+        static_cast<double>(activeSampleRateHz_),
         static_cast<double>(sweepStartFreq),
         static_cast<double>(sweepEndFreq));
 
     rtl::tools::suppressPeriodicSpurs(
         spliced_spectrum, static_cast<double>(sweepStartFreq), static_cast<double>(sweepEndFreq));
 
+    // Smooth in linear power, not dB, so averaging preserves physical power
+    // relationships and avoids biasing very weak bins.
     constexpr double EMA_ALPHA = 0.6;
     if (hasPrevSpectrum_ && prevSpectrum_.size() == spliced_spectrum.size()) {
         for (std::size_t i = 0; i < spliced_spectrum.size(); ++i) {
@@ -261,6 +381,8 @@ void ScanEngine::spliceAndPush(
     hasPrevSpectrum_  = true;
 
     nlohmann::json result_arr = nlohmann::json::array();
+    // Merge overlapping detections from adjacent hops, then use short-lived
+    // tracks to suppress one-sweep flicker in the published result list.
     std::sort(currentFmDetections_.begin(), currentFmDetections_.end(), [](const auto& a, const auto& b) {
         if (a.centerHz == b.centerHz) return a.confidence > b.confidence;
         return a.centerHz < b.centerHz;

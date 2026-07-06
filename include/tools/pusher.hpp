@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -37,6 +38,9 @@ public:
 
     /**
      * @brief Stop the background worker and release resources.
+     *
+     * @note Destruction gives the worker a bounded drain window to post queued
+     * data. Any payloads still pending after the deadline are logged and dropped.
      */
     ~Pusher();
 
@@ -78,8 +82,10 @@ private:
 
     std::unordered_map<std::string, rtl::sda_b::Aircraft> filterLatestAircraft(AircraftQueue& queue);
     bool                                                  hasPendingData() const;
+    bool                                                  shouldContinueWork() const;
 
     std::atomic<bool> loop_{true};
+    std::atomic<std::int64_t> drainDeadlineMs_{0};
     std::thread       workThread_;
 
     mutable std::mutex         lock_;

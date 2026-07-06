@@ -2,6 +2,11 @@
 #include "constants.hpp"
 #include <spdlog/spdlog.h>
 
+/**
+ * @file fft_engine.cpp
+ * @brief Reusable FFTW plan wrapper for scan-hop power accumulation.
+ */
+
 namespace rtl::tools {
 
 FftEngine::FftEngine(int fftSize)
@@ -41,6 +46,8 @@ std::pair<std::vector<double>, int> FftEngine::accumulatePower(const std::comple
         return {fft_out, 0};
     }
 
+    // Accumulate several FFT groups from one RTL-SDR read. Averaging happens
+    // later in spectrumToDb(), which keeps this hot loop in linear power units.
     for (int g = 0; g < groupsNum; ++g) {
         for (int k = 0; k < fftSize_; ++k) {
             in_[k][0] = static_cast<double>(buf[g * fftSize_ + k].real());
@@ -50,6 +57,8 @@ std::pair<std::vector<double>, int> FftEngine::accumulatePower(const std::comple
         fftw_execute(plan_);
 
         for (int k = 0; k < fftSize_; ++k) {
+            // FFTW returns DC at bin zero. Shift here so downstream code sees a
+            // spectrum ordered from -Fs/2 to +Fs/2 around the tuned center.
             int    shifted_k  = (k + half_) % fftSize_;
             double real       = out_[shifted_k][0];
             double imag       = out_[shifted_k][1];

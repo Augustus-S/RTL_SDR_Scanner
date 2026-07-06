@@ -10,10 +10,11 @@
 #include <queue>
 #include <thread>
 #include <vector>
+#include "scanner/scan_profile.hpp"
 
 /**
  * @file persistent_async_reader.hpp
- * @brief Persistent worker thread for synchronous RTL-SDR reads with timeout-aware request tracking.
+ * @brief Persistent worker thread for timeout-aware, cancellable RTL-SDR reads.
  */
 
 namespace rtl::scanner {
@@ -48,13 +49,22 @@ public:
 
     /**
      * @brief Tune and read a block from the RTL-SDR device.
+     *
+     * @note The call blocks until the request completes, times out, fails, or is
+     * shut down. Internally the worker uses librtlsdr async reads so timeout and
+     * shutdown paths can cancel the active transfer.
+     *
      * @param outBuf Caller-owned destination buffer.
      * @param outLen Input: capacity in bytes; output: bytes copied on success.
      * @param centerFreq Center frequency in Hz.
      * @param directSampling Direct sampling mode passed to librtlsdr.
      * @param timeoutMs Maximum wait time in milliseconds.
+     * @param tuneSettleMs Delay after tuning before reading, in milliseconds.
+     * @param resetPolicy Controls when the RTL-SDR sample buffer is reset.
+     * @param forceReset Forces a buffer reset before this read.
      * @return SUCCESS, TIMEOUT, DEVICE_ERROR or SHUTDOWN.
-     * @note The request length must not exceed MAX_READ_BYTES.
+     * @note The request length must not exceed MAX_READ_BYTES. When direct
+     * sampling changes, the worker switches direct sampling before tuning.
      */
     ReadResult
         read(
@@ -63,7 +73,9 @@ public:
             std::uint32_t centerFreq,
             int directSampling,
             int timeoutMs,
-            int tuneSettleMs);
+            int tuneSettleMs,
+            ResetPolicy resetPolicy,
+            bool forceReset);
 
     /**
      * @brief Stop the worker thread and discard pending commands.
@@ -82,12 +94,13 @@ private:
         std::uint32_t                         centerFreq     = 0;
         int                                   directSampling = 0;
         int                                   tuneSettleMs   = 50;
+        ResetPolicy                           resetPolicy    = ResetPolicy::ADAPTIVE;
+        bool                                  forceReset     = false;
         std::chrono::steady_clock::time_point deadline;
         std::uint32_t                         expectedLen = 0;
     };
 
     void readerLoop();
-    bool isDeviceAlive();
 
     rtlsdr_dev_t* dev_;
 
@@ -106,6 +119,7 @@ private:
 
     std::atomic<bool> running_{false};
     int               currentDirectSampling_ = -1;
+    bool              resetAfterError_       = true;
 
     static constexpr int         STABILIZE_MS   = 20;
     static constexpr std::size_t MAX_READ_BYTES = 2 * 1024 * 1024;

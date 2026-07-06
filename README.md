@@ -23,12 +23,13 @@ Runtime and build dependencies:
 - `fftw3`
 - `spdlog`
 - `nlohmann_json`
+- `alsa`
 - POSIX threads
 
 Example package names on Debian/Ubuntu-like systems:
 
 ```bash
-sudo apt install cmake g++ librtlsdr-dev libfftw3-dev libspdlog-dev nlohmann-json3-dev
+sudo apt install cmake g++ librtlsdr-dev libfftw3-dev libspdlog-dev nlohmann-json3-dev libasound2-dev
 ```
 
 ## Hardware And RTL-SDR Driver
@@ -148,10 +149,12 @@ Example scan parameter update:
 ```bash
 curl -X POST http://127.0.0.1:23569/scan/param \
   -H 'Content-Type: application/json' \
-  -d '{"start_freq": 88000000, "end_freq": 108000000}'
+  -d '{"start_freq": 88000000, "end_freq": 108000000, "scan_profile": "balanced", "scan_sample_rate": 2400000, "reset_policy": "adaptive"}'
 ```
 
-`/scan/param` expects Hz, not MHz.
+`/scan/param` expects frequency fields in Hz. `scan_sample_rate` accepts either Hz, such as `2400000`, or MHz-style numeric values below `10000`, such as `2.4`. `scan_profile` accepts `fast`, `balanced`, or `accurate`. `reset_policy` accepts `adaptive` or `always`.
+
+`GET /status` returns the current scan range, `scan_profile`, `scan_sample_rate`, and `reset_policy` along with the ADS-B and scan enable flags.
 
 ## Public C++ Interfaces
 
@@ -195,6 +198,7 @@ Primary types:
 - `PersistentAsyncReader`
 
 `PersistentAsyncReader::read()` uses a caller-owned output buffer. `outLen` is both input capacity and output bytes copied.
+The reader uses cancellable librtlsdr async transfers internally, so timeout and shutdown requests can interrupt an active scan read.
 
 ### ADS-B Module
 

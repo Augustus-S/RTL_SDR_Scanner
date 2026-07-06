@@ -4,6 +4,11 @@
 #include <thread>
 #include <chrono>
 
+/**
+ * @file adsb_engine.cpp
+ * @brief Time-sliced ADS-B receive loop around librtlsdr async reading.
+ */
+
 namespace rtl::sda_b {
 
 namespace {
@@ -26,6 +31,8 @@ ADSBEngine::RunResult
     ADSBEngine::runSlice(std::chrono::milliseconds maxDuration, const std::function<bool()>& shouldContinue) {
     stopRequested_ = false;
 
+    // ADS-B slices take full ownership of the shared dongle configuration:
+    // 1090 MHz, 2 MS/s, normal quadrature sampling, and maximum tuner gain.
     rtlsdr_set_sample_rate(dev_, rtl::constants::ADSB_SAMPLE_RATE);
     rtlsdr_set_direct_sampling(dev_, 0);
     rtlsdr_set_tuner_gain_mode(dev_, 1);
@@ -34,6 +41,8 @@ ADSBEngine::RunResult
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     rtlsdr_reset_buffer(dev_);
 
+    // rtlsdr_read_async blocks until cancelled or failed, so run it on a helper
+    // thread while this function enforces the slice duration/cancellation policy.
     std::atomic<int> adsbAsyncRet{0};
     std::thread      adsbThread([&]() {
         int ret = rtlsdr_read_async(dev_, adsbAsyncCallback, &demodulator_, 12, rtl::constants::ADSB_READ_LEN);

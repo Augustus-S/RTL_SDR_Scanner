@@ -34,10 +34,22 @@ public:
         return running_.load();
     }
 
+    /** @brief Set the sweep frequency range in Hz. */
     void                                    setFreqRange(std::uint32_t startHz, std::uint32_t endHz);
+    /** @brief Return the configured sweep frequency range in Hz. */
     std::pair<std::uint32_t, std::uint32_t> getFreqRange() const;
+    /** @brief Set the scan speed/accuracy profile used for subsequent sweeps. */
     void                                    setScanProfile(ScanProfile profile);
+    /** @brief Return the configured scan profile. */
     ScanProfile                             getScanProfile() const;
+    /** @brief Request the scan sample rate in samples per second. */
+    void                                    setScanSampleRate(std::uint32_t sampleRateHz);
+    /** @brief Return the active sample rate, including any hardware fallback. */
+    std::uint32_t                           getScanSampleRate() const;
+    /** @brief Set when the RTL-SDR sample buffer should be reset between hops. */
+    void                                    setResetPolicy(ResetPolicy policy);
+    /** @brief Return the configured reset policy. */
+    ResetPolicy                             getResetPolicy() const;
 
     enum class SweepResult {
         COMPLETED,
@@ -45,6 +57,15 @@ public:
         DEVICE_ERROR
     };
 
+    /**
+     * @brief Execute one complete scan sweep using the current configuration.
+     *
+     * @param shouldContinue Optional cancellation predicate checked between hops.
+     * @return COMPLETED when data was collected and pushed, STOPPED on
+     * cancellation or invalid range, DEVICE_ERROR on unrecoverable SDR failure.
+     * @note Changing range, profile, or active sample rate clears smoothing and
+     * AM/FM detection tracks before the next sweep.
+     */
     SweepResult doOneSweep(const std::function<bool()>& shouldContinue = {});
 
 private:
@@ -85,6 +106,12 @@ private:
     std::atomic<std::uint32_t> startFreq_{0};
     std::atomic<std::uint32_t> endFreq_{0};
     std::atomic<ScanProfile>   scanProfile_{ScanProfile::BALANCED};
+    std::atomic<std::uint32_t> scanSampleRateHz_{2400000};
+    std::atomic<ResetPolicy>   resetPolicy_{ResetPolicy::ADAPTIVE};
+    std::uint32_t              activeSampleRateHz_{0};
+    bool                       forceNextReset_{true};
+    int                        sweepResetCount_{0};
+    int                        lastDirectSampling_{-1};
 
     std::vector<std::uint8_t>              bufferU8_;
     std::vector<std::complex<short>>       bufferIQ_;
@@ -99,6 +126,14 @@ private:
 
     std::vector<double> prevSpectrum_;
     bool                hasPrevSpectrum_{false};
+    bool                hasLastSweepConfig_{false};
+    std::uint32_t       lastSweepStartFreq_{0};
+    std::uint32_t       lastSweepEndFreq_{0};
+    std::uint32_t       lastSweepSampleRateHz_{0};
+    ScanProfile         lastSweepProfile_{ScanProfile::BALANCED};
+
+    bool configureSampleRate(std::uint32_t requestedRateHz);
+    void resetSweepHistory();
 };
 
 } // namespace rtl::scanner

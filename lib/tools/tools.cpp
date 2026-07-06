@@ -9,6 +9,11 @@
 #include <sstream>
 #include <algorithm>
 
+/**
+ * @file tools.cpp
+ * @brief Shared DSP helpers for scan planning, spectrum conversion, and cleanup.
+ */
+
 namespace rtl::tools {
 
 rtl::scanner::ScanPlan buildScanPlan(double startFreq, double endFreq, double rate) {
@@ -47,6 +52,8 @@ std::pair<std::vector<double>, std::vector<double>> spliceSpectrum(
     std::vector<double> power_sum(total_bins, 0.0);
     std::vector<double> weight_sum(total_bins, 0.0);
 
+    // Weighted overlap-add reduces seams where adjacent tuned hops cover the
+    // same frequencies with different tuner/filter response.
     std::vector<double> window(rtl::constants::FFT_SIZE);
     for (int k = 0; k < rtl::constants::FFT_SIZE; ++k) {
         window[k] = 0.5 * (1.0 - std::cos(2.0 * M_PI * k / (rtl::constants::FFT_SIZE - 1)));
@@ -101,6 +108,8 @@ std::pair<std::vector<double>, std::vector<double>> spliceSpectrum(
 void removeDc(std::complex<short>* buf, size_t bufLen) {
     if (buf == nullptr || bufLen == 0) return;
 
+    // Remove per-block I/Q bias before FFT so the center bin does not dominate
+    // weak-signal detection.
     double sum_i = 0.0, sum_q = 0.0;
     for (size_t i = 0; i < bufLen; ++i) {
         sum_i += static_cast<double>(buf[i].real());
@@ -120,6 +129,8 @@ std::vector<double> spectrumToDb(const std::vector<double>& fftPowerSum, int gro
     std::vector<double> db(rtl::constants::FFT_SIZE, -200.0);
     if (groupsNum <= 0) return db;
 
+    // Normalize by FFT length, accumulation count, and 8-bit ADC full scale so
+    // output values are comparable across reads and scan profiles.
     double           norm = static_cast<double>(groupsNum) * rtl::constants::FFT_SIZE * rtl::constants::FFT_SIZE
                           * rtl::constants::FULL_SCALE_REF;
     constexpr double eps  = 1e-18;
@@ -217,6 +228,8 @@ void suppressPeriodicSpurs(
         }
     };
 
+    // USB/tuner artifacts often appear at regular frequency intervals. Only
+    // replace narrow peaks that stand above neighboring local medians.
     double first_spike_freq = std::ceil(startFreq / spikeIntervalHz) * spikeIntervalHz;
 
     for (double freq = first_spike_freq; freq <= endFreq; freq += spikeIntervalHz) {

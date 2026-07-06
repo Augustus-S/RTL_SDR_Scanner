@@ -62,14 +62,40 @@ class FMDetector {
 public:
     explicit FMDetector(FmDetectionConfig config = {});
 
+    /**
+     * @brief Find FM broadcast candidates in a sweep spectrum.
+     * @param spectrum Spectrum power values in dBFS.
+     * @param sweepStartHz Frequency represented by the first spectrum bin, in Hz.
+     * @param sweepEndHz Frequency represented by the last spectrum bin, in Hz.
+     */
     std::vector<FmCandidate>
         findCandidates(const std::vector<double>& spectrum, double sweepStartHz, double sweepEndHz) const;
 
+    /**
+     * @brief Re-tune and verify FM candidates using fresh IQ samples.
+     * @param reader RTL-SDR reader used to collect verification IQ data.
+     * @param candidates Candidate list from findCandidates().
+     * @param sampleRateHz IQ sample rate in samples per second.
+     * @param shouldContinue Optional cancellation predicate checked between candidates.
+     */
     std::vector<FmDetection> verifyCandidates(
         PersistentAsyncReader&          reader,
         const std::vector<FmCandidate>& candidates,
+        double                          sampleRateHz,
         const std::function<bool()>&    shouldContinue = {}) const;
 
+    /**
+     * @brief Detect and verify FM candidates using IQ from the current scan hop.
+     * @param spectrum Hop spectrum power values in dBFS.
+     * @param segmentStartHz Frequency represented by the first spectrum bin, in Hz.
+     * @param segmentEndHz Frequency represented by the last spectrum bin, in Hz.
+     * @param iq Interleaved unsigned 8-bit IQ samples from librtlsdr.
+     * @param bytesRead Number of valid bytes in iq.
+     * @param tunerCenterHz RTL-SDR center frequency for the IQ buffer, in Hz.
+     * @param sampleRateHz IQ sample rate in samples per second.
+     * @param maxIqVerifications Maximum candidates to verify in this hop.
+     * @param verificationAttempts Optional output count of candidates attempted.
+     */
     std::vector<FmDetection> detectInIqSegment(
         const std::vector<double>& spectrum,
         double                     segmentStartHz,
@@ -77,6 +103,7 @@ public:
         const std::uint8_t*        iq,
         std::uint32_t              bytesRead,
         double                     tunerCenterHz,
+        double                     sampleRateHz,
         int                        maxIqVerifications,
         int*                       verificationAttempts = nullptr) const;
 
@@ -95,7 +122,8 @@ private:
         double confidence  = 0.0;
     };
 
-    IqFeatures analyzeIq(const std::uint8_t* iq, std::uint32_t bytesRead, double mixerOffsetHz) const;
+    IqFeatures
+        analyzeIq(const std::uint8_t* iq, std::uint32_t bytesRead, double mixerOffsetHz, double sampleRateHz) const;
 
     FmDetectionConfig config_;
 };
